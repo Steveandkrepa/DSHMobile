@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>zh-Hans</string>
+	<key>CFBundleDisplayName</key>
+	<string>DSH</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+
+	<!-- 全屏启动：SwiftUI App 需要这个 key（空 dict）避免上下黑边 -->
+	<key>UILaunchScreen</key>
+	<dict/>
+
+	<!-- 方向：iPhone/iPad 都支持竖屏，iPad 额外支持横屏 -->
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+	</array>
+	<key>UISupportedInterfaceOrientations~ipad</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+
+	<!-- 本客户端需要连到用户自己配置的 DSH 服务器：
+	     · 局域网直连通常是 http://192.168.x.x:PORT（明文）
+	     · 公网走 https（dsh-market.com relay / cloudflare tunnel）
+	     因此必须允许明文 HTTP 连局域网/自定义地址，否则 ATS 会直接掐掉 LAN 直连。
+	     （本 App 走 SideStore 自签安装，不涉及 App Store 审核的 ATS 审查。） -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+
+	<!-- 局域网权限说明（iOS 14+ 会弹本地网络授权） -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>需要访问本地网络，以便直连你局域网里的 DSH 服务器。</string>
+</dict>
+</plist>

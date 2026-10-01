@@ -1,0 +1,12 @@
+# Xcode / XcodeGen
+DSHMobile.xcodeproj/
+build/
+DerivedData/
+*.ipa
+
+# macOS
+.DS_Store
+
+# Swift Package Manager
+.swiftpm/
+.build/

@@ -1,0 +1,149 @@
+# ============================================================================
+#  DSHMobile — XcodeGen 工程描述文件
+#  ---------------------------------------------------------------------------
+#  为什么用 XcodeGen：
+#    · 仓库里不放 .xcodeproj/project.pbxproj（几千行、几乎无法 review、合并必冲突）
+#    · 工程配置以纯文本 + 注释的形式被 git 跟踪，改一行就是一个可读的 diff
+#    · 构建机上 `xcodegen generate` 一条命令还原工程，不依赖任何本机状态
+#
+#  使用方式：
+#      brew install xcodegen
+#      cd <仓库根目录>
+#      xcodegen generate          # 生成 DSHMobile.xcodeproj
+#      open DSHMobile.xcodeproj   # 或用 scripts/make-unsigned-ipa.sh 直接出 IPA
+#
+#  重要：本文件与本项目「不签名 + SideStore 自签」的交付方式强绑定，
+#       所有签名相关的开关都写在下面，且有中文注释解释原因。
+# ============================================================================
+
+name: DSHMobile
+
+# ----------------------------------------------------------------- 工程选项
+options:
+  # 生成的 project.pbxproj 格式版本。
+  # 用 xcode16_0：Xcode 16 与 Xcode 26 都能直接打开，且不会引入
+  # xcode16_3 才有的新字段（老一点的 Xcode 打不开新格式会直接报错）。
+  projectFormat: xcode16_0
+
+  # 全工程默认部署版本。这是 XcodeGen 里设置 IPHONEOS_DEPLOYMENT_TARGET 的
+  # 规范位置；target 的 settings 里又显式写了一遍（同值，不冲突），
+  # 目的是让 `grep 17.0` 能一眼看到，也防止有人只改一处。
+  #
+  # 17.0 是刻意选的低水位线：本 App 是纯 SwiftUI + URLSession + WebSocket，
+  # 用到的 API 全部在 iOS 17 里就位；这样它能装到 2023 年之后的任何 iPhone/iPad，
+  # 同时在最新 iOS（26/27）上原生运行、拿到最新的系统外观。
+  deploymentTarget:
+    iOS: "17.0"
+
+  # Bundle ID 前缀。只有 target 完全没有 PRODUCT_BUNDLE_IDENTIFIER 时才会被
+  # 用来拼 `前缀.Target名`。本项目在 target 里显式写死了全小写的
+  # com.yuanjunhao.dshmobile，所以这里纯属兜底。
+  bundleIdPrefix: com.yuanjunhao
+
+  # 让 Xcode 左侧导航栏的 group 层级与磁盘目录完全一致。
+  createIntermediateGroups: true
+
+  # 本项目所有 UI 文案都是硬编码中文，没有任何 .lproj / Base.lproj 本地化目录。
+  useBaseInternationalization: false
+
+  # 工程开发语言。与 Resources/Info.plist 里的 CFBundleDevelopmentRegion 保持一致。
+  developmentLanguage: zh-Hans
+
+# ------------------------------------------------------------------- 构建配置
+configs:
+  Debug: debug
+  Release: release
+
+# ---------------------------------------------------------------- 项目级设置
+settings:
+  base:
+    # 关掉「用户脚本沙箱」。Xcode 15 起新建工程默认打开它，
+    # 打开后 Run Script Phase 只能读自己的输入、写自己的输出，
+    # 任何额外的文件读写都会让构建失败。
+    # ⚠️ "NO" 必须带引号：YAML 1.1 会把裸写的 NO/YES/ON/OFF 当成布尔值。
+    ENABLE_USER_SCRIPT_SANDBOXING: "NO"
+
+# ---------------------------------------------------------------------- 目标
+targets:
+  DSHMobile:
+    type: application
+    platform: iOS
+
+    # ------------------------------------------------------------- 源码与资源
+    sources:
+      # 源码根目录，递归收集下面的所有 .swift。
+      - path: DSHMobile
+
+      # Asset catalog：交给 actool 编译成 Assets.car。
+      - path: Resources/Assets.xcassets
+        buildPhase: resources
+
+      # Info.plist 只通过下面的 INFOPLIST_FILE 被引用。
+      - path: Resources/Info.plist
+        buildPhase: none
+
+    # ------------------------------------------------------------- 构建设置
+    settings:
+      base:
+        # ---- 身份 ----
+        PRODUCT_BUNDLE_IDENTIFIER: com.yuanjunhao.dshmobile
+        PRODUCT_NAME: "$(TARGET_NAME)"
+        MARKETING_VERSION: "1.0"          # → Info.plist 的 CFBundleShortVersionString
+        CURRENT_PROJECT_VERSION: "1"      # → Info.plist 的 CFBundleVersion
+
+        # ---- Info.plist / 资源 ----
+        INFOPLIST_FILE: Resources/Info.plist
+        GENERATE_INFOPLIST_FILE: "NO"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+
+        # ---- 平台 ----
+        IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+        # 1 = iPhone，2 = iPad。必须是字符串，不能写成数字。
+        TARGETED_DEVICE_FAMILY: "1,2"
+
+        # ---- Swift ----
+        SWIFT_VERSION: "5.0"
+        # 刻意用 minimal：Swift 6 语言模式 / complete 严格并发检查会对
+        # SwiftUI + URLSession 混用处产生大量并发隔离报错，
+        # 对一个要"能稳定出包"的工程来说收益远小于风险。
+        SWIFT_STRICT_CONCURRENCY: minimal
+        # 本工程零第三方依赖（纯 Swift + SwiftUI + Foundation），
+        # 所以没有任何包管理相关配置。
+
+        # ---- 签名：刻意**不**在这里硬编码 ----
+        # 出未签名 IPA 的那条链路是在**命令行**上覆盖签名开关的：
+        #   · scripts/make-unsigned-ipa.sh  → BUILD_ARGS 里带
+        #         CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO
+        #         CODE_SIGN_IDENTITY="" CODE_SIGN_ENTITLEMENTS=""
+        #   · .github/workflows/build-ipa.yml 直接调用上面这个脚本
+        # 工程文件本身不需要、也不应该把这些值写死。
+        #
+        # ⚠️ 这里刻意没有任何 *.entitlements 文件，也没有 capabilities。
+        #    本项目不用 iCloud/CloudKit、不用 App Group、不用远程推送、
+        #    不用 HealthKit、不用 Associated Domains
+        #    —— 全部是为了绕开免费 Apple ID 无法签发的 entitlement。
+
+      configs:
+        Release:
+          DEBUG_INFORMATION_FORMAT: dwarf-with-dsym
+          SWIFT_COMPILATION_MODE: wholemodule
+
+# ---------------------------------------------------------------------- 方案
+# 显式生成一个 **shared scheme**（写入
+# DSHMobile.xcodeproj/xcshareddata/xcschemes/DSHMobile.xcscheme）。
+# 这一步不能省：CI 上跑的是 `xcodebuild -scheme DSHMobile`，
+# 如果没有 shared scheme，headless 环境下 xcodebuild 找不到 scheme，
+# 会以 "xcodebuild: error: The project named "DSHMobile" does not contain
+# a scheme named "DSHMobile"" 直接失败。
+schemes:
+  DSHMobile:
+    management:
+      shared: true
+    build:
+      targets:
+        DSHMobile: all
+    run:
+      config: Debug
+    archive:
+      config: Release

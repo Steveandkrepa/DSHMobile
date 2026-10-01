@@ -1,0 +1,241 @@
+# ============================================================================
+#  DSHMobile — GitHub Actions：云端构建「未签名 IPA」
+#  ---------------------------------------------------------------------------
+#  产物：一个完全未签名的 .ipa（无 _CodeSignature / 无 embedded.mobileprovision），
+#       下载后 AirDrop 到 iPhone/iPad，用 SideStore 重签安装。
+#
+#  ⚠️ 本工作流刻意**不做**任何签名、不配任何 Secret、不需要证书。
+#     免费 Apple ID 签不出的 entitlement（iCloud / App Group / 推送 /
+#     HealthKit / Background Modes / Associated Domains）本项目一律没用。
+# ============================================================================
+
+name: Build Unsigned IPA
+
+# ------------------------------------------------------------------ 触发条件
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: '运行构建的 macOS runner 镜像'
+        required: false
+        default: 'macos-latest'
+        type: string
+      keep_dsym:
+        description: '是否额外上传 dSYM（崩溃符号化用）'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+
+concurrency:
+  group: build-ipa-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-unsigned-ipa:
+    name: 构建未签名 IPA
+    runs-on: ${{ github.event.inputs.runner || 'macos-latest' }}
+
+    steps:
+      # ---------------------------------------------------------------- 1
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      # ---------------------------------------------------------------- 2
+      - name: 选择最新的 Xcode
+        id: pick-xcode
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "== /Applications 下的 Xcode =="
+          ls -d /Applications/Xcode*.app 2>/dev/null || true
+
+          # 版本号比较：a > b 返回 0，否则返回 1（BSD sort 不支持 -V，手写）。
+          version_gt() {
+            awk -v a="$1" -v b="$2" 'BEGIN{
+              n = split(a, x, "."); m = split(b, y, ".");
+              max = (n > m) ? n : m;
+              for (i = 1; i <= max; i++) {
+                xi = (i <= n) ? x[i] + 0 : 0;
+                yi = (i <= m) ? y[i] + 0 : 0;
+                if (xi > yi) exit 0;
+                if (xi < yi) exit 1;
+              }
+              exit 1;
+            }'
+          }
+
+          best_app=""
+          best_ver="0.0"
+          for app in /Applications/Xcode*.app; do
+            [ -d "$app" ] || continue
+            ver="$(plutil -extract CFBundleShortVersionString raw -o - \
+                    "$app/Contents/Info.plist" 2>/dev/null || echo "")"
+            [ -n "$ver" ] || continue
+            echo "  found: $app  ($ver)"
+            if [ -z "$best_app" ] || version_gt "$ver" "$best_ver"; then
+              best_app="$app"
+              best_ver="$ver"
+            fi
+          done
+
+          if [ -z "$best_app" ]; then
+            echo "::error title=找不到 Xcode::这个 runner 镜像上没有 /Applications/Xcode*.app。"
+            echo "  处理：把 runs-on 换成一个自带 Xcode 的 macOS 镜像（例如 macos-15 / macos-26）。"
+            exit 1
+          fi
+
+          echo "选用 Xcode：$best_app ($best_ver)"
+          sudo xcode-select -s "$best_app/Contents/Developer"
+          echo "developer_dir=$best_app/Contents/Developer" >> "$GITHUB_OUTPUT"
+          echo "xcode_version=$best_ver" >> "$GITHUB_OUTPUT"
+
+          echo "== xcode-select -p =="
+          xcode-select -p
+          echo "== xcodebuild -version =="
+          xcodebuild -version
+
+      # ---------------------------------------------------------------- 3
+      - name: 安装 XcodeGen
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen || true
+          fi
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            echo "::error title=xcodegen 安装失败::brew install xcodegen 没有成功。请检查 runner 的 Homebrew 是否可用。"
+            exit 1
+          fi
+          xcodegen --version
+
+      # ---------------------------------------------------------------- 4
+      # 本机验证套件（不依赖 iOS SDK）：swiftc -parse 全部源码 +
+      # 配置文件/资源/脚本静态检查 + 有 Xcode 时顺带做一次完整编译。
+      # 挂了就不出包。
+      - name: 运行测试与静态检查（verify-all）
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x scripts/verify-all.sh
+          ./scripts/verify-all.sh
+
+      # ---------------------------------------------------------------- 5
+      - name: 准备构建元信息（时间戳 / 短 SHA）
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          stamp="$(date -u '+%Y%m%d-%H%M%S')"
+          short_sha="$(git rev-parse --short HEAD)"
+          echo "stamp=$stamp" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$short_sha" >> "$GITHUB_OUTPUT"
+          echo "ipa_name=DSHMobile-unsigned-$stamp-$short_sha.ipa" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=DSHMobile-unsigned-ipa-${stamp}-${short_sha}" >> "$GITHUB_OUTPUT"
+
+      # ---------------------------------------------------------------- 6
+      - name: 构建未签名 IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x scripts/make-unsigned-ipa.sh
+          ./scripts/make-unsigned-ipa.sh \
+            DSHMobile \
+            Release \
+            "$PWD/build/${{ steps.meta.outputs.ipa_name }}"
+
+      # ---------------------------------------------------------------- 7
+      - name: 收集构建日志（Xcode / SDK 版本快照）
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/logs
+          {
+            echo "== 触发信息 =="
+            echo "ref        : ${{ github.ref }}"
+            echo "sha        : ${{ github.sha }}"
+            echo "runner     : ${{ runner.os }} / ${{ runner.arch }}"
+            echo "镜像       : ${ImageOS:-n/a} ${ImageVersion:-n/a}"
+            echo "时间(UTC)  : ${{ steps.meta.outputs.stamp }}"
+            echo
+            echo "== xcode-select -p =="
+            xcode-select -p || true
+            echo
+            echo "== xcodebuild -version =="
+            xcodebuild -version || true
+            echo
+            echo "== xcodebuild -showsdks =="
+            xcodebuild -showsdks || true
+            echo
+            echo "== iphoneos SDK 版本 =="
+            xcrun --sdk iphoneos --show-sdk-version || true
+            echo
+            echo "== swift --version =="
+            swift --version || true
+            echo
+            echo "== xcodegen --version =="
+            xcodegen --version || true
+          } > build/logs/build-environment.txt 2>&1
+          cat build/logs/build-environment.txt
+
+      # ---------------------------------------------------------------- 8
+      - name: 上传 IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.artifact_name }}
+          path: build/*.ipa
+          if-no-files-found: error
+          retention-days: 14
+
+      # ---------------------------------------------------------------- 9
+      - name: 上传构建日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.artifact_name }}-logs
+          path: build/logs/
+          if-no-files-found: warn
+          retention-days: 14
+
+      # ---------------------------------------------------------------- 10
+      - name: 上传 dSYM（可选，用于崩溃符号化）
+        if: always() && (github.event_name != 'workflow_dispatch' || inputs.keep_dsym == 'true')
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.artifact_name }}-dsym
+          path: build/DerivedData/Build/Products/*/*.dSYM
+          if-no-files-found: warn
+          retention-days: 14
+
+      # ---------------------------------------------------------------- 11
+      - name: 汇总结果
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## DSHMobile 未签名 IPA 构建结果"
+            echo ""
+            echo "| 项目 | 值 |"
+            echo "| --- | --- |"
+            echo "| Xcode | ${{ steps.pick-xcode.outputs.xcode_version }} |"
+            echo "| 提交 | \`${{ github.sha }}\` |"
+            echo "| artifact | \`${{ steps.meta.outputs.artifact_name }}\` |"
+            echo "| 时间(UTC) | ${{ steps.meta.outputs.stamp }} |"
+            echo ""
+            echo "下载 artifact 里的 .ipa → AirDrop 到 iPhone/iPad → 用 SideStore 打开安装。"
+            echo ""
+            echo "免费 Apple ID 限制：证书 7 天过期需续签；同时最多 3 个自签 App。"
+          } >> "$GITHUB_STEP_SUMMARY"
