@@ -10,3 +10,4 @@ DerivedData/
 # Swift Package Manager
 .swiftpm/
 .build/
+.swift-cache/
