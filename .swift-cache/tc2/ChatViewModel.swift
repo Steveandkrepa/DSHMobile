@@ -12,7 +12,7 @@
 //    · 发送消息（session.prompt）、取消（session.cancel）。
 // ============================================================================
 import Foundation
-import SwiftUI
+
 
 @MainActor
 final class ChatViewModel: ObservableObject {

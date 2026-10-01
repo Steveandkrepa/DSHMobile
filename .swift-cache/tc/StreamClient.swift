@@ -15,6 +15,7 @@
 //  断线自动重连（指数退避），重连后由上层重新 open follow 流。
 // ============================================================================
 import Foundation
+import FoundationNetworking
 
 /// 一条逻辑流的帧
 enum StreamFrame {
@@ -51,7 +52,7 @@ final class StreamClient {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 60
         config.timeoutIntervalForResource = 300
-        config.waitsForConnectivity = false
+        //         config.waitsForConnectivity = false
         self.session = URLSession(configuration: config)
     }
 
