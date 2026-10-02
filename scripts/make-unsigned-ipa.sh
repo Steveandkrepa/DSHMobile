@@ -161,17 +161,14 @@ xcodebuild "${BUILD_ARGS[@]}" build
 # ============================================================ 4. 定位产物
 step "[4/6] 从 -showBuildSettings 读取真实的产物路径"
 
-# 注意：这里用 `-target DSHMobile` 而不是 `-scheme DSHMobile` 来查设置。
-# scheme 包含多个 target 时（主 App + Widget 扩展），`-scheme ... -showBuildSettings`
-# 会依次打印每个 target 的设置，`tail -n 1` 会取到**最后一个** target（即
-# DSHMobileWidgets）的 FULL_PRODUCT_NAME（DSHMobileWidgets.appex），导致把扩展
-# 误当主 App 打包。`-target` 只返回指定 target 的设置，FULL_PRODUCT_NAME 恒为主 App。
-BUILD_SETTINGS="$(xcodebuild \
-    -project "$PROJECT_FILE" \
-    -target DSHMobile \
-    -configuration "$CONFIGURATION" \
-    -derivedDataPath "$DERIVED_DATA" \
-    -showBuildSettings 2>/dev/null)"
+# scheme 含多个 target（主 App + Widget 扩展）时，`-scheme ... -showBuildSettings`
+# 会依次打印每个 target 的设置。主 App 与扩展共享同一个 BUILT_PRODUCTS_DIR，
+# 但 FULL_PRODUCT_NAME / EXECUTABLE_NAME 各自不同（DSHMobile.app / DSHMobile
+# 对 DSHMobileWidgets.appex / DSHMobileWidgets），因此这里：
+#   · BUILT_PRODUCTS_DIR 直接用（所有 target 相同）；
+#   · FULL_PRODUCT_NAME 取以 `.app` 结尾的那个，排除扩展的 `.appex`；
+#   · EXECUTABLE_NAME 由主 App 产物名去掉扩展名得到。
+BUILD_SETTINGS="$(xcodebuild "${BUILD_ARGS[@]}" -showBuildSettings 2>/dev/null)"
 
 read_setting() {
     printf '%s\n' "$BUILD_SETTINGS" \
@@ -184,11 +181,13 @@ read_setting() {
 }
 
 BUILT_PRODUCTS_DIR="$(read_setting BUILT_PRODUCTS_DIR)"
-FULL_PRODUCT_NAME="$(read_setting FULL_PRODUCT_NAME)"
-EXECUTABLE_NAME="$(read_setting EXECUTABLE_NAME)"
+FULL_PRODUCT_NAME="$(printf '%s\n' "$BUILD_SETTINGS" \
+    | awk '/FULL_PRODUCT_NAME/{v=$0; sub(/^[[:space:]]*[^=]*=[[:space:]]*/, "", v); if (v ~ /\.app$/) print v}' \
+    | tail -n 1)"
+EXECUTABLE_NAME="${FULL_PRODUCT_NAME%.app}"
 
 [ -n "$BUILT_PRODUCTS_DIR" ] || die "-showBuildSettings 里没拿到 BUILT_PRODUCTS_DIR"
-[ -n "$FULL_PRODUCT_NAME" ]  || die "-showBuildSettings 里没拿到 FULL_PRODUCT_NAME"
+[ -n "$FULL_PRODUCT_NAME" ]  || die "-showBuildSettings 里没拿到 FULL_PRODUCT_NAME（没有以 .app 结尾的产物？）"
 [ -n "$EXECUTABLE_NAME" ]    || die "-showBuildSettings 里没拿到 EXECUTABLE_NAME"
 
 APP_PATH="$BUILT_PRODUCTS_DIR/$FULL_PRODUCT_NAME"
