@@ -14,6 +14,9 @@
 - 🎛️ **全量设置界面**：schema 驱动通用表单，覆盖 DSH Web「设置」页全部命名空间
   （文本 / 数字 / 开关 / 枚举 / 对象分组 / 数组列表 / 键值映射 / JSON 编辑），保存带修订冲突保护
 - 🔑 **凭证管理**：查看 / 添加 / 清除模型 API Key 等凭证（不显示明文）
+- 🔔 **本地通知**：回复完成且 App 在后台时推送本地通知提醒（消息到达 / 任务完成），设置里可开关
+- 🕐 **灵动岛 + 实时活动（Live Activity）**：任务运行期间在灵动岛 / 锁屏 / 通知中心实时显示生成进度（流式字符数 + 进度条），完成 / 取消自动收尾；设置里可开关
+- 🧩 **Widget 扩展**：独立的 `DSHMobileWidgets` 扩展 target（ActivityConfiguration）承载灵动岛与锁屏 UI
 - 🍎 **无需越狱**：产物是未签名 IPA，用 [SideStore](https://sidestore.io) 免费 Apple ID 重签安装
 - 📱 **iOS 17+**：SwiftUI 原生实现，适配 iPhone 与 iPad
 
@@ -33,6 +36,7 @@
 ## 技术栈
 
 - **SwiftUI**（iOS 17.0+ 部署目标，支持最新 iOS）
+- **ActivityKit / UserNotifications**：本地实时活动（灵动岛 + 锁屏）+ 本地通知；免费签名无 APNs，全部走本地更新
 - **XcodeGen**：`project.yml` 是工程唯一事实来源，`.xcodeproj` 由 `xcodegen generate` 生成
 - **纯 URLSession**：HTTP JSON-RPC + WebSocket 流式，零第三方依赖
 - **GitHub Actions**：`macos-latest` runner 自动挑最新 Xcode 出未签名 IPA
