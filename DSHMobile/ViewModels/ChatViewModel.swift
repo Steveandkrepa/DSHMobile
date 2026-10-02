@@ -60,6 +60,42 @@ final class ChatViewModel: ObservableObject {
     /// 当前正在执行的步骤（工具调用 / 思考 / 等待授权），供灵动岛长按展示
     private var currentStep: String = ""
 
+    // MARK: - token 统计与真实进度（来自服务端投影）
+
+    /// 一次 usage 样本的四个累计桶（对齐服务端 tokenUsage 的 projectionSchema）
+    private struct TokenBuckets {
+        var uncachedInput: Int = 0
+        var output: Int = 0
+        var cacheRead: Int = 0
+        var cacheWrite: Int = 0
+        static func + (l: TokenBuckets, r: TokenBuckets) -> TokenBuckets {
+            TokenBuckets(uncachedInput: l.uncachedInput + r.uncachedInput,
+                         output: l.output + r.output,
+                         cacheRead: l.cacheRead + r.cacheRead,
+                         cacheWrite: l.cacheWrite + r.cacheWrite)
+        }
+        static func - (l: TokenBuckets, r: TokenBuckets) -> TokenBuckets {
+            TokenBuckets(uncachedInput: l.uncachedInput - r.uncachedInput,
+                         output: l.output - r.output,
+                         cacheRead: l.cacheRead - r.cacheRead,
+                         cacheWrite: l.cacheWrite - r.cacheWrite)
+        }
+        /// 输入侧 token（uncached + cache 读写）+ 输出 token = 本次请求总消耗
+        var total: Int { uncachedInput + cacheRead + cacheWrite + output }
+        var inputSide: Int { uncachedInput + cacheRead + cacheWrite }
+    }
+
+    /// 当前累计 token 总量（= 初始快照基线 + 其后的 live 增量）
+    private var tokenTotals = TokenBuckets()
+    /// 按 (turn, step) 记忆本槽位最近一次 usage 样本，用于 addReplacing（同槽替换、异槽累加）
+    private var usageByTurnStep: [String: TokenBuckets] = [:]
+    /// 上下文窗口大小（来自 contextPressure 投影，缺省为 0 → 回落字符启发式进度）
+    private var contextWindow: Int = 0
+    /// 快照时的上下文占用估算（projectedTokens），用于计算真实进度
+    private var baselineContextTokens: Int = 0
+    /// 快照基线里的输出 token（用于计算本会话自快照后的输出增量）
+    private var baselineOutputTokens: Int = 0
+
     init(sessionId: String, settings: AppSettings? = nil) {
         self.sessionId = sessionId
         // AppSettings.shared 是 MainActor 隔离的；在 init 体内访问（init 本身 MainActor）
@@ -169,6 +205,10 @@ final class ChatViewModel: ObservableObject {
             if !hasLoadedInitial {
                 hasLoadedInitial = true
                 messages.removeAll()
+                // 基线 token / 上下文：初始快照投影里已含会话当前的累计消耗，
+                // 之后 follow 流只推事件与 assistant-stream，不再推投影更新，
+                // 因此这里一次性读取基线，其后的 usage 事件在基线上累加。
+                captureBaselineProjections(snap.projections)
                 for rec in records {
                     fold(event: rec.event)
                 }
@@ -183,6 +223,31 @@ final class ChatViewModel: ObservableObject {
         } catch {
             errorMessage = "快照解析失败：\(error.localizedDescription)"
         }
+    }
+
+    /// 从初始快照投影读取 token 基线（tokenUsage.totals）与上下文窗口 / 占用估算（contextPressure）。
+    /// 投影形状：projections.values.tokenUsage = {totals:{uncachedInputTokens,outputTokens,cacheReadTokens,cacheWriteTokens}}；
+    ///            projections.values.contextPressure = {contextWindow?,pressureTokens?,projectedTokens?}（wire view）。
+    private func captureBaselineProjections(_ projections: AnyCodable?) {
+        let values = projections?.objectValue?["values"]?.objectValue
+        // tokenUsage 基线
+        if let totals = values?["tokenUsage"]?.objectValue?["totals"]?.objectValue {
+            let b = TokenBuckets(
+                uncachedInput: totals["uncachedInputTokens"]?.numberValue.map(Int.init) ?? 0,
+                output: totals["outputTokens"]?.numberValue.map(Int.init) ?? 0,
+                cacheRead: totals["cacheReadTokens"]?.numberValue.map(Int.init) ?? 0,
+                cacheWrite: totals["cacheWriteTokens"]?.numberValue.map(Int.init) ?? 0
+            )
+            tokenTotals = b
+            baselineOutputTokens = b.output
+        }
+        // contextPressure 上下文窗口与占用估算
+        if let cp = values?["contextPressure"]?.objectValue {
+            contextWindow = cp["contextWindow"]?.numberValue.map(Int.init) ?? 0
+            baselineContextTokens = cp["projectedTokens"]?.numberValue.map(Int.init) ?? 0
+        }
+        // 新会话 / 新快照 → 清空 live 增量槽
+        usageByTurnStep.removeAll()
     }
 
     // MARK: - durable 事件折叠
@@ -210,6 +275,8 @@ final class ChatViewModel: ObservableObject {
             }
             isStreaming = false
             canSend = true
+            // 该消息的 usage 样本（服务端权威值）→ 累加进 token 统计
+            applyUsageFromEventData(event.data)
 
         case "session/title":
             if let t = event.data?.objectValue?["title"]?.stringValue, !t.isEmpty {
@@ -331,6 +398,10 @@ final class ChatViewModel: ObservableObject {
                 updateLiveActivityProgress()
             } else if chunk.isToolCallDelta {
                 messages[idx].appendToolCall(id: chunk.id, name: chunk.name, argumentsDelta: chunk.argumentsDelta ?? "", at: index)
+            } else if chunk.isUsage, let usage = chunk.usage?.objectValue {
+                // 流式 usage 样本：同 (turn, step) 槽位 addReplacing
+                applyUsage(turn: Double(frame.turn ?? 0), step: Double(frame.step ?? 0), usage: usage)
+                updateLiveActivityProgress()
             }
 
         } else if frame.isEnd {
@@ -386,6 +457,64 @@ final class ChatViewModel: ObservableObject {
                 self.errorMessage = "取消失败：\(error.localizedDescription)"
             }
         }
+    }
+
+    // MARK: - token 统计
+
+    /// 从 assistant/message 事件 data 提取 usage 样本并累加。
+    /// data 形状：{usage:{inputTokens,outputTokens,cacheReadTokens?,cacheWriteTokens?,totalTokens?,reasoningTokens?}, turn, step}。
+    private func applyUsageFromEventData(_ data: AnyCodable?) {
+        guard let obj = data?.objectValue,
+              let usage = obj["usage"]?.objectValue,
+              let turn = obj["turn"]?.numberValue,
+              let step = obj["step"]?.numberValue else { return }
+        applyUsage(turn: turn, step: step, usage: usage)
+    }
+
+    /// 把一个 usage 样本按 (turn, step) 槽位做 addReplacing 后并入 tokenTotals：
+    /// 同一槽位的新样本替换旧样本（重试 / 流式增量会为同一槽位报告多次），
+    /// 不同槽位直接累加。与服务端 dsh-token-meter 语义一致。
+    private func applyUsage(turn: Double, step: Double, usage: [String: AnyCodable]) {
+        let sample = TokenBuckets(
+            uncachedInput: usage["inputTokens"]?.numberValue.map(Int.init) ?? 0,
+            output: usage["outputTokens"]?.numberValue.map(Int.init) ?? 0,
+            cacheRead: usage["cacheReadTokens"]?.numberValue.map(Int.init) ?? 0,
+            cacheWrite: usage["cacheWriteTokens"]?.numberValue.map(Int.init) ?? 0
+        )
+        let key = "\(Int(turn))-\(Int(step))"
+        if let old = usageByTurnStep[key] {
+            tokenTotals = tokenTotals - old
+        }
+        usageByTurnStep[key] = sample
+        tokenTotals = tokenTotals + sample
+    }
+
+    /// 格式化 token 数字：>=1000 → "1.2K"，否则原数
+    private static func shortToken(_ n: Int) -> String {
+        if n >= 1_000_000 { return String(format: "%.1fM", Double(n) / 1_000_000) }
+        if n >= 1_000 { return String(format: "%.1fK", Double(n) / 1_000) }
+        return "\(n)"
+    }
+
+    /// 灵动岛 / 锁屏展示的 token 文案："输出 3.2K · 总计 12.4K"
+    private func tokensText() -> String {
+        "输出 \(Self.shortToken(tokenTotals.output)) · 总计 \(Self.shortToken(tokenTotals.total))"
+    }
+
+    /// 计算当前进度：优先用真实上下文占用（contextPressure），否则回落字符启发式。
+    /// 真实进度 = (快照时 projectedTokens + 本会话累计输出增量) / contextWindow。
+    private func currentProgress(streamedChars: Int) -> Double {
+        if contextWindow > 0 {
+            // 快照后累计的输出 token 增量（tokenTotals 始终 = 基线 + live 增量）
+            let liveOutput = max(0, tokenTotals.output - baselineOutputTokens)
+            let occupied = baselineContextTokens + liveOutput
+            if occupied > 0 {
+                // 占用达到上下文窗口 → 逼近 95%（留出余量，避免"卡在 100%"假象）
+                return min(0.95, Double(occupied) / Double(contextWindow))
+            }
+        }
+        // 回落：字符启发式（约 2 万字符后逼近 92%）
+        return min(0.92, 0.15 + Double(streamedChars) / 20_000.0 * 0.77)
     }
 
     // MARK: - 通知 / 实时活动
@@ -509,22 +638,22 @@ final class ChatViewModel: ObservableObject {
         return String(text.suffix(60))
     }
 
-    /// 流式增量：更新进度（估算）与状态文案
+    /// 流式增量：更新进度（真实上下文占用优先）与状态文案
     private func updateLiveActivityProgress() {
         guard settings.liveActivitiesEnabled, let liveActivity else { return }
-        // 汇总当前流式消息已收文本长度作为进度参考
+        // 汇总当前流式消息已收文本长度作为进度参考（字符启发式回落时用）
         streamedChars = messages.reduce(0) { acc, m in
             acc + m.blocks.reduce(0) { $0 + ($1.text.count) }
         }
-        // 无真实总量：用字符数做单调递增的饱和估算（约 2 万字符后逼近 92%）
-        let estimated = min(0.92, 0.15 + Double(streamedChars) / 20_000.0 * 0.77)
+        let progress = currentProgress(streamedChars: streamedChars)
         let detail = liveActivityPreview() ?? "正在生成回复…"
         ActivityManager.shared.update(
-            progress: estimated,
+            progress: progress,
             status: "运行中",
             detail: detail,
             chars: streamedChars,
-            step: currentStep
+            step: currentStep,
+            tokens: tokensText()
         )
     }
 
@@ -535,14 +664,15 @@ final class ChatViewModel: ObservableObject {
         streamedChars = messages.reduce(0) { acc, m in
             acc + m.blocks.reduce(0) { $0 + ($1.text.count) }
         }
-        let estimated = min(0.92, 0.15 + Double(streamedChars) / 20_000.0 * 0.77)
+        let progress = currentProgress(streamedChars: streamedChars)
         let text = detail ?? liveActivityPreview() ?? "正在生成回复…"
         ActivityManager.shared.update(
-            progress: estimated,
+            progress: progress,
             status: "运行中",
             detail: text,
             chars: streamedChars,
-            step: currentStep
+            step: currentStep,
+            tokens: tokensText()
         )
     }
 

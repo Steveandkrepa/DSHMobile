@@ -17,10 +17,12 @@
 //    WKWebView 的 cookie store，免重新扫码直接进入官方 GUI（/pair-app）。
 //    若 deviceId 失效，web 显示配对失败页 → 引导重新配对。
 //
-//  控制入口：右下角悬浮齿轮 → WebShellControlSheet（通知/灵动岛/会话关注/
-//    服务器与配对），原生能力集中管理。
+//  控制入口：Web 设置页内注入的"App 设置"按钮 → WebShellControlSheet
+//    （通知/灵动岛/会话关注/服务器与配对），原生能力集中管理；
+//    新窗口链接（window.open / target=_blank）在壳内直接打开。
 // ============================================================================
 import SwiftUI
+import UIKit
 import WebKit
 
 struct WebConsoleView: View {
@@ -61,23 +63,6 @@ struct WebConsoleView: View {
                             .allowsHitTesting(false)
                     }
                 }
-                .overlay(alignment: .bottomTrailing) {
-                    // 右下角悬浮控制按钮（App 感）
-                    Button {
-                        showControlSheet = true
-                    } label: {
-                        Image(systemName: "gearshape.fill")
-                            .font(.system(size: 17, weight: .semibold))
-                            .foregroundStyle(.white)
-                            .frame(width: 48, height: 48)
-                            .background(.ultraThinMaterial, in: Circle())
-                            .overlay(Circle().strokeBorder(.white.opacity(0.25)))
-                    }
-                    .padding(.trailing, 16)
-                    .padding(.bottom, 20)
-                    .accessibilityLabel("App 控制")
-                    .shadow(color: .black.opacity(0.25), radius: 6, y: 3)
-                }
             } else {
                 ProgressView("正在连接…")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -105,6 +90,12 @@ struct WebConsoleView: View {
             coordinator.onSessionChanged = { sessionId in
                 // Web 壳里打开的会话变化 → 自动"特别关注"当前打开的会话
                 settings.sessionBecameActive(sessionId)
+            }
+            coordinator.onOpenControl = {
+                // Web 设置页里的"App 设置"按钮 → 唤起原生控制面板
+                Task { @MainActor in
+                    showControlSheet = true
+                }
             }
             await prepareURL()
         }
@@ -213,7 +204,7 @@ struct WebConsoleView: View {
 // MARK: - Coordinator（桥接 WKWebView 代理事件）
 
 @MainActor
-final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
+final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
     /// 页面加载失败回调（网络错误/证书问题等 → 显示给用户）
     var onLoadError: ((String) -> Void)?
     /// 配对失败页回调（加载的页面是配对失败页 → 引导重新配对）
@@ -224,6 +215,8 @@ final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler 
     var onLoaded: (() -> Void)?
     /// Web 壳里打开的会话变化回调（JS 回传 sessionId；无会话时为 nil）
     var onSessionChanged: ((String?) -> Void)?
+    /// Web 设置页"App 设置"按钮回调（JS postMessage → 唤起原生控制面板）
+    var onOpenControl: (() -> Void)?
 
     private weak var webView: WKWebView?
     private let pairingFailureMarkers = ["配对", "pair", "未授权", "授权", "设备"]
@@ -231,17 +224,25 @@ final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler 
     func attach(_ webView: WKWebView) {
         self.webView = webView
         webView.navigationDelegate = self
+        webView.uiDelegate = self
     }
 
     // MARK: WKScriptMessageHandler
 
-    /// 接收 JS 回传的当前会话 ID（message.name == "dshSession"）
+    /// 接收 JS 回传的消息：
+    /// - "dshSession"：当前打开的会话 ID
+    /// - "dshOpenControl"：Web 设置页里的"App 设置"按钮
     nonisolated func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-        guard message.name == "dshSession" else { return }
-        let body = message.body as? String
-        let sessionId = (body?.isEmpty ?? true) ? nil : body
-        Task { @MainActor [weak self] in
-            self?.onSessionChanged?(sessionId)
+        if message.name == "dshSession" {
+            let body = message.body as? String
+            let sessionId = (body?.isEmpty ?? true) ? nil : body
+            Task { @MainActor [weak self] in
+                self?.onSessionChanged?(sessionId)
+            }
+        } else if message.name == "dshOpenControl" {
+            Task { @MainActor [weak self] in
+                self?.onOpenControl?()
+            }
         }
     }
 
@@ -292,6 +293,75 @@ final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler 
         }
     }
 
+    // MARK: WKUIDelegate
+
+    /// window.open / target="_blank" 的新窗口请求：在同一个 Web 壳里打开，
+    /// 而不是丢给浏览器（WKWebView 默认忽略新窗口 → 表现为"点开没反应"）。
+    nonisolated func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
+                             for navigationAction: WKNavigationAction,
+                             windowFeatures: WKWindowFeatures) -> WKWebView? {
+        // 新窗口请求直接在当前 webView 里加载（SPA 内部跳转 / 设置页的子页面）
+        // 非 http(s) 的私有 scheme（如 dsh-resource:// 文件预览）不接管，
+        // 交给页面自身的点击处理。
+        if navigationAction.targetFrame == nil,
+           let scheme = navigationAction.request.url?.scheme?.lowercased(),
+           scheme == "http" || scheme == "https" {
+            Task { @MainActor in
+                webView.load(navigationAction.request)
+            }
+        }
+        return nil
+    }
+
+    /// 兜底：targetFrame == nil 的导航（target="_blank" 链接）在当前 webView 加载。
+    nonisolated func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
+                             decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        if navigationAction.targetFrame == nil,
+           let scheme = navigationAction.request.url?.scheme?.lowercased(),
+           scheme == "http" || scheme == "https" {
+            Task { @MainActor in
+                webView.load(navigationAction.request)
+            }
+            decisionHandler(.cancel)
+        } else {
+            decisionHandler(.allow)
+        }
+    }
+
+    /// JS alert() → 原生弹窗（避免 Web 页 JS 对话框无响应）
+    nonisolated func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String,
+                             initiatedByFrame frame: WKFrameInfo,
+                             completionHandler: @escaping () -> Void) {
+        Task { @MainActor in
+            let alert = UIAlertController(title: nil, message: message, preferredStyle: .alert)
+            alert.addAction(UIAlertAction(title: "好", style: .default) { _ in completionHandler() })
+            presentOnTop(alert)
+        }
+    }
+
+    /// JS confirm() → 原生确认框
+    nonisolated func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String,
+                             initiatedByFrame frame: WKFrameInfo,
+                             completionHandler: @escaping (Bool) -> Void) {
+        Task { @MainActor in
+            let alert = UIAlertController(title: nil, message: message, preferredStyle: .alert)
+            alert.addAction(UIAlertAction(title: "取消", style: .cancel) { _ in completionHandler(false) })
+            alert.addAction(UIAlertAction(title: "确定", style: .default) { _ in completionHandler(true) })
+            presentOnTop(alert)
+        }
+    }
+
+    /// 从 keyWindow 的 rootViewController 弹原生 UIAlertController
+    private func presentOnTop(_ alert: UIAlertController) {
+        var top = UIApplication.shared.connectedScenes
+            .compactMap { ($0 as? UIWindowScene)?.keyWindow }
+            .first?.rootViewController
+        while let presented = top?.presentedViewController {
+            top = presented
+        }
+        top?.present(alert, animated: true)
+    }
+
     // MARK: 内部
 
     /// 启发式判断当前页面是否为配对失败页（URL path 是 pair 且标题含配对相关标记）
@@ -330,6 +400,8 @@ struct WebViewRepresentable: UIViewRepresentable {
         configuration.userContentController.addUserScript(userScript)
         // 会话检测回传通道：JS 把当前打开的会话 ID 发给原生层
         configuration.userContentController.add(context.coordinator, name: "dshSession")
+        // Web 设置页"App 设置"按钮回传通道
+        configuration.userContentController.add(context.coordinator, name: "dshOpenControl")
 
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.allowsBackForwardNavigationGestures = true
@@ -454,6 +526,64 @@ enum WebViewCoordinator {
         setInterval(report, 2000);
       }
       startSessionWatch();
+
+      // ---- Web 设置页注入"App 设置"按钮 ----
+      // 原生悬浮齿轮按钮已移除；改在 Web 设置页（data-shortcut-modal="settings"
+      // 模态）的头部注入一个"App 设置"按钮，点击 → postMessage → 原生控制面板。
+      // 幂等：同一元素存在时不重复创建；模态关闭（DOM 卸载）后自动随组件消失。
+      function injectAppSettingsButton() {
+        if (window.__dshAppSettingsBtnStarted) { return; }
+        window.__dshAppSettingsBtnStarted = true;
+        function findPanel() {
+          return document.querySelector('[data-shortcut-modal="settings"]');
+        }
+        function ensureButton() {
+          var panel = findPanel();
+          if (!panel) { return; }
+          if (document.getElementById('dsh-app-settings-btn')) { return; }
+          var btn = document.createElement('button');
+          btn.id = 'dsh-app-settings-btn';
+          btn.type = 'button';
+          btn.textContent = 'App 设置';
+          btn.style.cssText = [
+            'position:absolute',
+            'right:44px',
+            'top:12px',
+            'z-index:9999',
+            'padding:6px 12px',
+            'border-radius:999px',
+            'border:1px solid rgba(168,85,247,.45)',
+            'background:rgba(168,85,247,.14)',
+            'color:var(--dsw-alias-label-primary,#e9d5ff)',
+            'font-size:13px',
+            'font-weight:600',
+            'line-height:20px',
+            'cursor:pointer',
+            'display:inline-flex',
+            'align-items:center',
+            'gap:4px',
+            'min-height:32px',
+            'touch-action:manipulation',
+            'backdrop-filter:blur(6px)',
+            '-webkit-backdrop-filter:blur(6px)'
+          ].join(';');
+          btn.addEventListener('click', function () {
+            try {
+              window.webkit.messageHandlers.dshOpenControl.postMessage('open');
+            } catch (e) { /* 原生侧未注册时忽略 */ }
+          });
+          panel.style.position = 'relative';
+          panel.appendChild(btn);
+        }
+        ensureButton();
+        try {
+          new MutationObserver(function () { ensureButton(); }).observe(
+            document.documentElement, { childList: true, subtree: true }
+          );
+        } catch (e) {}
+        setInterval(ensureButton, 1500);
+      }
+      injectAppSettingsButton();
     })();
     """
 }

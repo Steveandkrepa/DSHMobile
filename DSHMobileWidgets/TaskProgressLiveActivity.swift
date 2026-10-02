@@ -80,7 +80,12 @@ struct TaskProgressLiveActivity: Widget {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                 Spacer()
-                if context.state.chars > 0 {
+                if !context.state.tokens.isEmpty {
+                    Text(context.state.tokens)
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .monospacedDigit()
+                } else if context.state.chars > 0 {
                     Text("\(context.state.chars) 字符")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
@@ -140,7 +145,12 @@ struct LockScreenView: View {
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
                 Spacer()
-                if context.state.chars > 0 {
+                if !context.state.tokens.isEmpty {
+                    Text(context.state.tokens)
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .monospacedDigit()
+                } else if context.state.chars > 0 {
                     Text("\(context.state.chars) 字符")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)

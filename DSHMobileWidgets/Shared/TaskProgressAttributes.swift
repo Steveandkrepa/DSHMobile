@@ -35,12 +35,17 @@ public struct TaskProgressAttributes: ActivityAttributes {
         /// 供灵动岛长按展开 / 锁屏时展示当前执行到哪一步。
         public var step: String
 
-        public init(progress: Double, status: String, detail: String, chars: Int = 0, step: String = "") {
+        /// 会话累计 token 消耗（如"输出 3.2K · 总计 12.4K"），
+        /// 来自服务端 tokenUsage 投影（uncachedInput + cacheRead + cacheWrite + output）。
+        public var tokens: String
+
+        public init(progress: Double, status: String, detail: String, chars: Int = 0, step: String = "", tokens: String = "") {
             self.progress = progress
             self.status = status
             self.detail = detail
             self.chars = chars
             self.step = step
+            self.tokens = tokens
         }
     }
 
