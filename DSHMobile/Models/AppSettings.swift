@@ -18,6 +18,8 @@ final class AppSettings: ObservableObject {
         static let publicURL = "settings.publicURL"
         static let deviceId = "settings.deviceId"
         static let paired = "settings.paired"
+        static let notificationsEnabled = "settings.notificationsEnabled"
+        static let liveActivitiesEnabled = "settings.liveActivitiesEnabled"
     }
 
     // MARK: - 状态
@@ -25,6 +27,22 @@ final class AppSettings: ObservableObject {
     @Published var publicURL: String = UserDefaults.standard.string(forKey: Key.publicURL) ?? ""
     @Published var deviceId: String = UserDefaults.standard.string(forKey: Key.deviceId) ?? ""
     @Published var isPaired: Bool = UserDefaults.standard.bool(forKey: Key.paired)
+
+    /// 消息推送 / 任务提醒（本地通知）
+    @Published var notificationsEnabled: Bool = {
+        if UserDefaults.standard.object(forKey: Key.notificationsEnabled) == nil {
+            return true // 默认开启
+        }
+        return UserDefaults.standard.bool(forKey: Key.notificationsEnabled)
+    }()
+
+    /// 灵动岛 / 实时活动
+    @Published var liveActivitiesEnabled: Bool = {
+        if UserDefaults.standard.object(forKey: Key.liveActivitiesEnabled) == nil {
+            return true // 默认开启
+        }
+        return UserDefaults.standard.bool(forKey: Key.liveActivitiesEnabled)
+    }()
 
     /// 当前生效的 base URL（自动检测后的结果）
     @Published private(set) var activeBaseURL: String?
@@ -68,6 +86,21 @@ final class AppSettings: ObservableObject {
         defaults.set(false, forKey: Key.paired)
         activeBaseURL = nil
         activeChannel = .unknown
+    }
+
+    // MARK: - 通知 / 实时活动开关
+    func setNotificationsEnabled(_ enabled: Bool) {
+        notificationsEnabled = enabled
+        defaults.set(enabled, forKey: Key.notificationsEnabled)
+    }
+
+    func setLiveActivitiesEnabled(_ enabled: Bool) {
+        liveActivitiesEnabled = enabled
+        defaults.set(enabled, forKey: Key.liveActivitiesEnabled)
+        if !enabled {
+            // 关闭时立即结束所有在途实时活动
+            ActivityManager.shared.endAll(status: "已关闭", detail: "实时活动已由设置关闭")
+        }
     }
 
     // MARK: - URL 规范化

@@ -58,5 +58,12 @@
 	<!-- 相机权限：扫码配对（扫远程配对链接二维码提取令牌） -->
 	<key>NSCameraUsageDescription</key>
 	<string>需要访问相机，扫描 DSH 配对链接的二维码即可完成配对，无需手输令牌。</string>
+
+	<!-- 实时活动（灵动岛 / 锁屏 / 通知中心）：
+	     此 key 必须存在，否则 ActivityKit 的实时活动不会生效。
+	     本项目只做本地更新（Activity.update / end），
+	     不需要 NSSupportsLiveActivitiesFrequentUpdates（那是给 APNs 频繁推送用的）。 -->
+	<key>NSSupportsLiveActivities</key>
+	<true/>
 </dict>
 </plist>

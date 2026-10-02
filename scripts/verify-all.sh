@@ -33,7 +33,7 @@ printf '%s  第 4 步需要完整 Xcode；没有时会自动跳过而不是报�
 
 # ───────────────────────────────────────────── 1. 语法检查
 step "1/4  Swift 语法检查（swiftc -parse）"
-SWIFT_FILES=$(find DSHMobile -name '*.swift' | sort)
+SWIFT_FILES=$(find DSHMobile DSHMobileWidgets -name '*.swift' | sort)
 COUNT=$(printf '%s\n' "$SWIFT_FILES" | wc -l | tr -d ' ')
 if [ -z "$SWIFT_FILES" ]; then
     fail "没找到任何 .swift 文件"
@@ -60,19 +60,22 @@ else
 fi
 
 # Info.plist：plutil 只有 macOS 有；Linux 用 python3 plistlib 校验。
-if command -v plutil >/dev/null 2>&1; then
-    if plutil -lint Resources/Info.plist >/dev/null 2>&1; then
-        pass "Resources/Info.plist 合法（plutil）"
-    else
-        fail "Info.plist 不合法"
+# 注意：Swift Linux 工具链自带一个 plutil，但其参数风格与 macOS 的
+# `plutil -lint file` 不兼容（会报 "No files specified"），因此这里
+# plutil 失败时回退到 plistlib，任一成功即通过。
+PLIST_BAD=0
+for p in Resources/Info.plist DSHMobileWidgets/Info.plist; do
+    OK=0
+    if command -v plutil >/dev/null 2>&1 && plutil -lint "$p" >/dev/null 2>&1; then
+        pass "$p 合法（plutil）"; OK=1
+    elif python3 -c "import plistlib,sys; plistlib.load(open(sys.argv[1],'rb'))" "$p" 2>/dev/null; then
+        pass "$p 合法（plistlib）"; OK=1
     fi
-else
-    if python3 -c "import plistlib; plistlib.load(open('Resources/Info.plist','rb'))" 2>/dev/null; then
-        pass "Resources/Info.plist 合法（plistlib）"
-    else
-        fail "Info.plist 不合法（python3 plistlib 解析失败）"
+    if [ "$OK" -eq 0 ]; then
+        fail "$p 不合法（plutil 与 plistlib 均失败）"; PLIST_BAD=1
     fi
-fi
+done
+[ "$PLIST_BAD" -eq 0 ] && true
 
 ASSET_BAD=0
 for j in $(find Resources -name 'Contents.json'); do

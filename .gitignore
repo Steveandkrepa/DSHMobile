@@ -11,3 +11,6 @@ DerivedData/
 .swiftpm/
 .build/
 .swift-cache/
+
+# 本地 Swift 工具链（Linux 校验用，勿提交）
+.toolchain-src/

@@ -11,8 +11,10 @@
 //      携带最终 seq，用于与随后的 assistant/message 事件对齐（替换为完整内容）。
 //    · 发送消息（session.prompt）、取消（session.cancel）。
 // ============================================================================
+import ActivityKit
 import Foundation
 import SwiftUI
+import UIKit
 
 @MainActor
 final class ChatViewModel: ObservableObject {
@@ -206,10 +208,14 @@ final class ChatViewModel: ObservableObject {
         case "turn/start":
             isStreaming = true
             canSend = false
+            beginLiveActivity()
+            notifyIfBackgrounded(title: "任务已启动", body: "\(title ?? "会话") 正在运行，稍后见结果。")
 
         case "turn/end":
             isStreaming = false
             canSend = true
+            finishLiveActivity(status: "已完成", detail: "任务已完成")
+            notifyIfBackgrounded(title: "任务已完成", body: "\(title ?? "会话") 的回复已就绪。")
 
         default:
             break
@@ -266,8 +272,10 @@ final class ChatViewModel: ObservableObject {
                 messages[idx].ensureBlock(at: index, type: chunk.blockType ?? "text")
             } else if chunk.isTextDelta, let text = chunk.text {
                 messages[idx].appendText(text, at: index)
+                updateLiveActivityProgress()
             } else if chunk.isReasoningDelta, let text = chunk.text {
                 messages[idx].appendReasoning(text, at: index)
+                updateLiveActivityProgress()
             } else if chunk.isToolCallDelta {
                 messages[idx].appendToolCall(id: chunk.id, name: chunk.name, argumentsDelta: chunk.argumentsDelta ?? "", at: index)
             }
@@ -282,9 +290,11 @@ final class ChatViewModel: ObservableObject {
                 messages[idx].seq = Int(seq)
                 messages[idx].isStreaming = false
                 // 等待随后的 assistant/message 事件替换为完整内容
+                finishLiveActivity(status: "已完成", detail: "回复生成完毕")
             } else {
                 // abandoned → 移除占位
                 messages.remove(at: idx)
+                finishLiveActivity(status: "已取消", detail: "任务已取消", progress: 1.0)
             }
             streamingIndexByAttempt[attemptId] = nil
             // 若没有其他在途流，恢复发送
@@ -313,6 +323,7 @@ final class ChatViewModel: ObservableObject {
     }
 
     func cancel() {
+        finishLiveActivity(status: "已取消", detail: "任务已取消", progress: 1.0)
         Task { [weak self] in
             guard let self else { return }
             do {
@@ -320,6 +331,75 @@ final class ChatViewModel: ObservableObject {
             } catch {
                 self.errorMessage = "取消失败：\(error.localizedDescription)"
             }
+        }
+    }
+
+    // MARK: - 通知 / 实时活动
+
+    /// 流式字符累计（用于实时活动的字符计数与进度估算）
+    private var streamedChars: Int = 0
+
+    /// 当前实时活动实例
+    private var liveActivity: Activity<TaskProgressAttributes>?
+
+    /// turn/start：启动实时活动
+    private func beginLiveActivity() {
+        guard settings.liveActivitiesEnabled else { return }
+        streamedChars = 0
+        liveActivity = ActivityManager.shared.start(sessionId: sessionId, sessionTitle: title ?? "DSH 会话")
+    }
+
+    /// 流式增量：更新进度（估算）与状态文案
+    private func updateLiveActivityProgress() {
+        guard settings.liveActivitiesEnabled, let liveActivity else { return }
+        // 汇总当前流式消息已收文本长度作为进度参考
+        streamedChars = messages.reduce(0) { acc, m in
+            acc + m.blocks.reduce(0) { $0 + ($1.text.count) }
+        }
+        // 无真实总量：用字符数做单调递增的饱和估算（约 2 万字符后逼近 92%）
+        let estimated = min(0.92, 0.15 + Double(streamedChars) / 20_000.0 * 0.77)
+        let detail = liveActivityPreview() ?? "正在生成回复…"
+        ActivityManager.shared.update(
+            progress: estimated,
+            status: "运行中",
+            detail: detail,
+            chars: streamedChars
+        )
+    }
+
+    /// 结束实时活动（完成 / 取消 / 失败）
+    private func finishLiveActivity(status: String, detail: String, progress: Double = 1.0) {
+        guard settings.liveActivitiesEnabled, liveActivity != nil else { return }
+        ActivityManager.shared.end(status: status, detail: detail, progress: progress)
+        liveActivity = nil
+    }
+
+    /// 从流式消息提取一段预览文案
+    private func liveActivityPreview() -> String? {
+        for m in messages.reversed() {
+            if m.isStreaming, let text = m.blocks.first(where: { $0.text.count > 0 })?.text {
+                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                return trimmed.isEmpty ? nil : String(trimmed.prefix(60))
+            }
+        }
+        return nil
+    }
+
+    /// App 不在前台时才发本地通知（前台聊天时弹通知很吵）
+    private func notifyIfBackgrounded(title: String, body: String) {
+        guard settings.notificationsEnabled else { return }
+        let isForeground = UIApplication.shared.applicationState == .active
+        guard !isForeground else { return }
+        Task { @MainActor in
+            let status = await NotificationManager.shared.authorizationStatus()
+            // 未决定时顺手请求一次授权；已拒绝就静默跳过（不再打扰）
+            guard status == .authorized || status == .provisional else {
+                if status == .notDetermined {
+                    _ = await NotificationManager.shared.requestAuthorization()
+                }
+                return
+            }
+            NotificationManager.shared.notify(title: title, body: body)
         }
     }
 

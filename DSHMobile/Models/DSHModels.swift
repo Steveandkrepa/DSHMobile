@@ -184,6 +184,15 @@ struct ChatMessage: Identifiable, Equatable {
             case .other: return nil
             }
         }
+
+        /// 纯文本内容（用于字符计数 / 预览）
+        var text: String {
+            switch self {
+            case .text(let t), .reasoning(let t): return t
+            case .toolCall(_, let n, _): return "[工具] \(n)"
+            case .other: return ""
+            }
+        }
     }
 
     let id: String          // "evt-<seq>" 或 "stream-<attemptId>"

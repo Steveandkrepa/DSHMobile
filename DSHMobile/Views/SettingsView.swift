@@ -36,6 +36,33 @@ struct SettingsView: View {
                     }
                 }
 
+                // 1.5 通知与实时活动
+                Section {
+                    Toggle(isOn: Binding(
+                        get: { settings.notificationsEnabled },
+                        set: { newValue in
+                            settings.setNotificationsEnabled(newValue)
+                            if newValue {
+                                Task { await NotificationManager.shared.requestAuthorization() }
+                            }
+                        }
+                    )) {
+                        Label("消息推送与任务提醒", systemImage: "bell.badge")
+                    }
+                    Toggle(isOn: Binding(
+                        get: { settings.liveActivitiesEnabled },
+                        set: { newValue in
+                            settings.setLiveActivitiesEnabled(newValue)
+                        }
+                    )) {
+                        Label("灵动岛与实时活动", systemImage: "sparkles.rectangle.stack")
+                    }
+                } header: {
+                    Text("通知")
+                } footer: {
+                    Text("任务运行中会在灵动岛 / 锁屏显示进度；回复完成且 App 在后台时推送本地通知。免费签名（SideStore）无法使用 APNs 远程推送，因此采用本地通知 + 实时活动实现。")
+                }
+
                 // 2. DSH 设置全量
                 Section {
                     switch viewModel.loadState {
