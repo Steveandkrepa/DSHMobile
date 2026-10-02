@@ -93,10 +93,10 @@ struct WebConsoleView: View {
         }
         let cookieStore = await WebViewCoordinator.sharedCookieStore()
         var hosts: [String] = []
-        if let pub = settings.publicURL, let pubURL = URL(string: pub), let host = pubURL.host {
+        if !settings.publicURL.isEmpty, let pubURL = URL(string: settings.publicURL), let host = pubURL.host {
             hosts.append(host)
         }
-        if let lan = settings.lanURL, let lanURL = URL(string: lan), let host = lanURL.host {
+        if !settings.lanURL.isEmpty, let lanURL = URL(string: settings.lanURL), let host = lanURL.host {
             if !hosts.contains(host) { hosts.append(host) }
         }
         for host in hosts {

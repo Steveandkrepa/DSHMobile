@@ -14,9 +14,11 @@
 - 🎛️ **全量设置界面**：schema 驱动通用表单，覆盖 DSH Web「设置」页全部命名空间
   （文本 / 数字 / 开关 / 枚举 / 对象分组 / 数组列表 / 键值映射 / JSON 编辑），保存带修订冲突保护
 - 🔑 **凭证管理**：查看 / 添加 / 清除模型 API Key 等凭证（不显示明文）
-- 🔔 **本地通知**：回复完成且 App 在后台时推送本地通知提醒（消息到达 / 任务完成），设置里可开关
+- 🔔 **本地通知**：围绕「需要处理」的一切——任务完成 / 运行失败 / 对话出现提问时推送通知（消息到达 / 任务完成），设置里可开关
+- 🎯 **会话级「特别关注」**：每个会话可设 跟随全局 / 特别关注 / 静音——特别关注的会话在前台也弹横幅，静音会话一律不打扰（灵动岛进度照常）；点击通知直接跳转对应会话
 - 🕐 **灵动岛 + 实时活动（Live Activity）**：任务运行期间在灵动岛 / 锁屏 / 通知中心实时显示生成进度（流式字符数 + 进度条），完成 / 取消自动收尾；设置里可开关
 - 🧩 **Widget 扩展**：独立的 `DSHMobileWidgets` 扩展 target（ActivityConfiguration）承载灵动岛与锁屏 UI
+- 🌐 **完整 Web 界面（混合架构）**：设置页顶部与会话列表工具栏的「完整 Web 界面」入口，内嵌官方 DSH Web（WKWebView + /pair-app），自动注入 dsh_pair 设备 cookie 复用配对身份——web 的全部功能（所有设置命名空间、凭证、模型管理…）一个不少，无需重新扫码配对
 - 🍎 **无需越狱**：产物是未签名 IPA，用 [SideStore](https://sidestore.io) 免费 Apple ID 重签安装
 - 📱 **iOS 17+**：SwiftUI 原生实现，适配 iPhone 与 iPad
 
@@ -80,7 +82,8 @@ DSHMobile/
 │       ├── SessionListView.swift  # 会话列表
 │       ├── ChatView.swift         # 聊天界面
 │       ├── SettingsView.swift     # 设置页（配对入口 + 全量设置 + 凭证）
-│       └── SchemaFormView.swift   # 通用 schema 驱动设置表单
+│       ├── SchemaFormView.swift   # 通用 schema 驱动设置表单
+│       └── WebConsoleView.swift   # 完整 Web 界面（WKWebView 内嵌官方 DSH Web）
 ├── scripts/
 │   ├── make-unsigned-ipa.sh       # 未签名 IPA 构建
 │   └── verify-all.sh              # 本机验证套件
