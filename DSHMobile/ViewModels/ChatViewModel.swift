@@ -48,8 +48,15 @@ final class ChatViewModel: ObservableObject {
     private var followTask: Task<Void, Never>?
     private var cursor = 0
     private var hasLoadedInitial = false
+    /// 初始快照是否已回放完毕：快照里的历史事件不触发通知 / 实时活动，
+    /// 只有其后到达的 live 事件才需要用户处理。
+    private var didApplyInitialSnapshot = false
     private var backoff: UInt64 = 500_000_000          // 0.5s 起步，翻倍到 8s
     private var streamingIndexByAttempt: [String: Int] = [:]
+    /// 用户主动取消本轮任务（用于区分"用户取消"与"任务失败"）
+    private var userCancelled = false
+    /// 本轮开始时刻的 seq 边界（用于 turn/end 判定本轮产生的消息）
+    private var turnStartSeq = 0
 
     init(sessionId: String, settings: AppSettings? = nil) {
         self.sessionId = sessionId
@@ -163,6 +170,8 @@ final class ChatViewModel: ObservableObject {
                 for rec in records {
                     fold(event: rec.event)
                 }
+                // 初始快照回放完毕：之后的 fold 事件才是 live 事件
+                didApplyInitialSnapshot = true
             } else {
                 for rec in records {
                     fold(event: rec.event)
@@ -208,14 +217,25 @@ final class ChatViewModel: ObservableObject {
         case "turn/start":
             isStreaming = true
             canSend = false
-            beginLiveActivity()
-            notifyIfBackgrounded(title: "任务已启动", body: "\(title ?? "会话") 正在运行，稍后见结果。")
+            // 新一轮：重置取消标记，记录本轮消息边界
+            userCancelled = false
+            turnStartSeq = cursor
+            // 初始快照回放的历史回合不启动实时活动 / 不通知
+            if didApplyInitialSnapshot {
+                beginLiveActivity()
+            }
+            // 启动本身不是"需要用户处理"的内容 → 不再发送"任务已启动"通知，
+            // 进度交给灵动岛 / 锁屏实时活动展示。
 
         case "turn/end":
             isStreaming = false
             canSend = true
-            finishLiveActivity(status: "已完成", detail: "任务已完成")
-            notifyIfBackgrounded(title: "任务已完成", body: "\(title ?? "会话") 的回复已就绪。")
+            if didApplyInitialSnapshot {
+                // 读取权威的回合结束原因（data.reason.kind）：
+                //   completed / blocked / aborted / error / max-tokens
+                let reasonKind = event.data?.objectValue?["reason"]?.objectValue?["kind"]?.stringValue
+                settleTurnEnd(reasonKind: reasonKind)
+            }
 
         default:
             break
@@ -289,12 +309,12 @@ final class ChatViewModel: ObservableObject {
             if kind == "committed", let seq = outcome?["seq"]?.numberValue {
                 messages[idx].seq = Int(seq)
                 messages[idx].isStreaming = false
-                // 等待随后的 assistant/message 事件替换为完整内容
-                finishLiveActivity(status: "已完成", detail: "回复生成完毕")
+                // 等待随后的 assistant/message 事件替换为完整内容；
+                // 完成判定统一交给 turn/end 的 settleTurnEnd()。
             } else {
                 // abandoned → 移除占位
                 messages.remove(at: idx)
-                finishLiveActivity(status: "已取消", detail: "任务已取消", progress: 1.0)
+                settleAbandoned()
             }
             streamingIndexByAttempt[attemptId] = nil
             // 若没有其他在途流，恢复发送
@@ -323,6 +343,7 @@ final class ChatViewModel: ObservableObject {
     }
 
     func cancel() {
+        userCancelled = true
         finishLiveActivity(status: "已取消", detail: "任务已取消", progress: 1.0)
         Task { [weak self] in
             guard let self else { return }
@@ -347,6 +368,112 @@ final class ChatViewModel: ObservableObject {
         guard settings.liveActivitiesEnabled else { return }
         streamedChars = 0
         liveActivity = ActivityManager.shared.start(sessionId: sessionId, sessionTitle: title ?? "DSH 会话")
+    }
+
+    // MARK: - 回合结算（通知只围绕"需要用户处理的内容"）
+
+    /// turn/end：统一结算本轮。
+    /// reasonKind 是服务端的权威回合结束原因：
+    ///   completed  → 正常完成；max-tokens → 达上限部分完成；
+    ///   blocked    → 等待用户输入（需要回复）；
+    ///   aborted    → 中断（reason 里 user=用户取消）；
+    ///   error      → 运行失败。
+    private func settleTurnEnd(reasonKind: String?) {
+        switch reasonKind {
+        case "error":
+            finishLiveActivity(status: "已失败", detail: "任务运行出错", progress: 1.0)
+            notifyIfBackgrounded(title: "任务失败", body: "\(title ?? "会话") 的任务运行出错，请查看对话。")
+            return
+        case "aborted":
+            if userCancelled {
+                // 用户主动取消 → 不打扰
+                finishLiveActivity(status: "已取消", detail: "任务已取消", progress: 1.0)
+            } else {
+                finishLiveActivity(status: "已中断", detail: "任务被中断", progress: 1.0)
+                notifyIfBackgrounded(title: "任务中断", body: "\(title ?? "会话") 的任务被中断，请查看对话。")
+            }
+            return
+        case "blocked":
+            // 等待用户输入 → 需要用户处理
+            finishLiveActivity(status: "等待回复", detail: "等待你的输入", progress: 1.0)
+            notifyIfBackgrounded(title: "对话需要你的回复", body: "\(title ?? "会话") 正在等待你的输入。")
+            return
+        default:
+            // completed / max-tokens / 未知 → 走提问检测
+            break
+        }
+        // 只检查本轮（seq > turnStartSeq）产生的已提交助手消息
+        let candidate = messages.last { m in
+            m.role == .assistant && !m.isStreaming && m.seq > turnStartSeq
+        }
+        if let last = candidate, messageAsksQuestion(last) {
+            let preview = questionPreview(from: last)
+            finishLiveActivity(status: "等待回复", detail: preview ?? "请查看对话", progress: 1.0)
+            notifyIfBackgrounded(title: "对话需要你的回复", body: preview ?? "\(title ?? "会话") 中助手向你提出了问题。")
+        } else {
+            // 完成（或异常但无提问）→ 通知结果就绪
+            let preview = candidate.flatMap { contentPreview(from: $0) }
+            finishLiveActivity(status: "已完成", detail: "任务已完成")
+            notifyIfBackgrounded(title: "任务已完成", body: preview ?? "\(title ?? "会话") 的回复已就绪。")
+        }
+    }
+
+    /// assistant-stream abandoned：区分"用户取消"（不打扰）与"任务失败"（通知）
+    private func settleAbandoned() {
+        if userCancelled {
+            // 用户主动取消 → 仅清灵动岛，不推送（用户自己发起的动作）
+            finishLiveActivity(status: "已取消", detail: "任务已取消", progress: 1.0)
+        } else {
+            finishLiveActivity(status: "已失败", detail: "任务失败或中断", progress: 1.0)
+            notifyIfBackgrounded(title: "任务失败", body: "\(title ?? "会话") 的任务失败或中断，请查看对话。")
+        }
+    }
+
+    /// 判断一条助手消息是否在向用户提问（需要用户处理）
+    private func messageAsksQuestion(_ m: ChatMessage) -> Bool {
+        // 1) 显式提问工具调用
+        if m.blocks.contains(where: {
+            if case .toolCall(_, let name, _) = $0 { return name == "ask_user_question" }
+            return false
+        }) { return true }
+        // 2) 文本形态的提问：以问号结尾，或含典型提问句式
+        let text = m.blocks.map { $0.text }
+            .filter { !$0.hasPrefix("[工具]") }
+            .joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return false }
+        if text.hasSuffix("?") || text.hasSuffix("？") { return true }
+        let markers = ["请选择", "请确认", "请回复", "请回答", "需要你", "可以吗", "行吗", "要不要", "是否继续", "是否要", "请你", "你希望"]
+        return markers.contains { text.contains($0) }
+    }
+
+    /// 提取提问预览：优先 ask_user_question 参数的 question 字段，否则取文本尾部
+    private func questionPreview(from m: ChatMessage) -> String? {
+        for block in m.blocks {
+            if case .toolCall(_, let name, let args) = block, name == "ask_user_question" {
+                if let data = args.data(using: .utf8),
+                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let q = obj["question"] as? String, !q.isEmpty {
+                    return String(q.prefix(80))
+                }
+            }
+        }
+        let text = m.blocks.map { $0.text }
+            .filter { !$0.hasPrefix("[工具]") }
+            .joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+        return String(text.suffix(80))
+    }
+
+    /// 常规内容预览（完成通知用）
+    private func contentPreview(from m: ChatMessage) -> String? {
+        let text = m.blocks.map { $0.text }
+            .filter { !$0.hasPrefix("[工具]") }
+            .joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+        return String(text.suffix(60))
     }
 
     /// 流式增量：更新进度（估算）与状态文案
