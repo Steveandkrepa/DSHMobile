@@ -68,9 +68,9 @@ func setValueAt(_ root: inout AnyCodable?, _ steps: [PathStep], to newValue: Any
             }
         } else {
             while arr.count <= i { arr.append(.null) }
-            var child = arr[i]
+            var child: AnyCodable? = arr[i]
             setValueAt(&child, Array(steps.dropFirst()), to: newValue)
-            arr[i] = child
+            arr[i] = child ?? .null
         }
         root = .array(arr)
     }
@@ -296,7 +296,7 @@ struct ConstField: View {
         HStack {
             Text(key)
             Spacer()
-            Text(anyCodableDisplay(value))
+            Text(anyCodableDisplay(value) ?? "")
                 .foregroundStyle(.secondary)
         }
     }
