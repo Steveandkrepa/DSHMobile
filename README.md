@@ -1,24 +1,26 @@
 # DSHMobile — DeepSeek Harness 的 iOS 客户端
 
-纯 Swift / SwiftUI 实现的 [DSH（DeepSeek Harness）](https://github.com/deepseek-ai/dsh) Web 界面客户端。
-通过 DSH 的「远程设备」配对机制，在 iPhone / iPad 上直接连接你的 DSH Web 实例并聊天。
+纯 Swift / SwiftUI 实现的 [DSH（DeepSeek Harness）](https://github.com/deepseek-ai/dsh) iOS 客户端。
+通过 DSH 的「远程设备」配对机制，在 iPhone / iPad 上获得与浏览器完全一致的 DSH 体验
+（App 化 Web 壳 + 原生通知/灵动岛叠加）。
 
 ## 功能
 
-- 🔗 **配对连接**：用配对令牌换 deviceId，长期有效（配合服务器端永久令牌配置）；**支持扫码配对**——直接扫描配对链接的二维码即可完成，无需手输令牌
+- 🌐 **App 化 Web 壳主界面**：官方 DSH Web 即 App 主体——全屏沉浸式 WKWebView，
+  无地址栏 / 无浏览器工具栏，顶部细进度条 + 下拉刷新；像拼多多那样的「网页内容 + App 体验」，
+  web 的全部功能（会话 / 全部设置命名空间 / 凭证 / 模型管理…）一个不少
+- 📱 **移动端响应式适配**：自动注入 viewport / 禁止缩放 / 防横向裁切 / 输入控件 16px 防聚焦放大 /
+  触控目标 ≥40px，解决 iPhone 直访 web UI 拥挤、点不到、元素消失的问题
+- 🔗 **配对连接**：用配对令牌换 deviceId，长期有效（配合服务器端永久令牌配置）；**支持扫码配对**——
+  直接扫描配对链接的二维码即可完成，无需手输令牌；web 壳自动注入 dsh_pair 设备 cookie 复用配对身份
 - 📶 **智能路由**：自动检测——同一 WiFi 下走局域网直连（低延迟），否则走公网中转（Cloudflare 隧道）
-- 💬 **实时聊天**：基于 DSH 的 WebSocket mux 流式协议，流式增量渲染（支持思考过程折叠 / 工具调用展示）
-- 📋 **会话管理**：浏览历史会话、新建会话、取消生成
-- ⚙️ **完全权限 = 本机访问**：配对设备凭证走 DSH 官方 `/remote` 镜像通道，与浏览器端一样读写全部 RPC——
-  会话、设置（全部 35 个命名空间）、凭证全部可达（仅配对/更新/插件管理三个控制面物理本地不可达）
-- 🎛️ **全量设置界面**：schema 驱动通用表单，覆盖 DSH Web「设置」页全部命名空间
-  （文本 / 数字 / 开关 / 枚举 / 对象分组 / 数组列表 / 键值映射 / JSON 编辑），保存带修订冲突保护
-- 🔑 **凭证管理**：查看 / 添加 / 清除模型 API Key 等凭证（不显示明文）
-- 🔔 **本地通知**：围绕「需要处理」的一切——任务完成 / 运行失败 / 对话出现提问时推送通知（消息到达 / 任务完成），设置里可开关
-- 🎯 **会话级「特别关注」**：每个会话可设 跟随全局 / 特别关注 / 静音——特别关注的会话在前台也弹横幅，静音会话一律不打扰（灵动岛进度照常）；点击通知直接跳转对应会话
-- 🕐 **灵动岛 + 实时活动（Live Activity）**：任务运行期间在灵动岛 / 锁屏 / 通知中心实时显示生成进度（流式字符数 + 进度条），完成 / 取消自动收尾；设置里可开关
+- ⚙️ **App 控制面板**：右下角悬浮齿轮打开——通知 / 灵动岛开关、会话级「特别关注」、服务器与配对、重新加载
+- 🎯 **会话级「特别关注」**：每个会话可设 跟随全局 / 特别关注 / 静音——特别关注的会话前台也弹横幅，
+  静音会话一律不打扰（灵动岛进度照常）
+- 🔔 **本地通知**：围绕「需要处理」的一切——任务完成 / 运行失败 / 对话出现提问时推送（跟随后台会话 watcher）
+- 🕐 **灵动岛 + 实时活动（Live Activity）**：任务运行期间在灵动岛 / 锁屏 / 通知中心实时显示生成进度
+  （流式字符数 + 进度条），完成 / 取消自动收尾；设置里可开关
 - 🧩 **Widget 扩展**：独立的 `DSHMobileWidgets` 扩展 target（ActivityConfiguration）承载灵动岛与锁屏 UI
-- 🌐 **完整 Web 界面（混合架构）**：设置页顶部与会话列表工具栏的「完整 Web 界面」入口，内嵌官方 DSH Web（WKWebView + /pair-app），自动注入 dsh_pair 设备 cookie 复用配对身份——web 的全部功能（所有设置命名空间、凭证、模型管理…）一个不少，无需重新扫码配对
 - 🍎 **无需越狱**：产物是未签名 IPA，用 [SideStore](https://sidestore.io) 免费 Apple ID 重签安装
 - 📱 **iOS 17+**：SwiftUI 原生实现，适配 iPhone 与 iPad
 
@@ -62,28 +64,30 @@ xcodegen generate --spec project.yml
 DSHMobile/
 ├── project.yml                    # XcodeGen 工程描述（唯一事实来源）
 ├── Resources/
-│   ├── Info.plist                 # 含 ATS（允许局域网明文 http）
+│   ├── Info.plist                 # 含 ATS（允许局域网明文 http）+ 相机权限
 │   └── Assets.xcassets/           # 图标 / 主题色
 ├── DSHMobile/
-│   ├── DSHMobileApp.swift         # App 入口 + 根视图分流
+│   ├── DSHMobileApp.swift         # App 入口 + 根视图分流（配对 → Web 壳）
 │   ├── Models/
 │   │   ├── DSHModels.swift        # 与 DSH 线上协议对齐的数据模型
-│   │   ├── SettingsModels.swift   # 设置（schemastery schema）数据模型
-│   │   └── AppSettings.swift      # 连接配置（地址/凭证/自动检测）
+│   │   └── AppSettings.swift      # 连接配置（地址/凭证/自动检测）+ 会话关注
 │   ├── Networking/
-│   │   ├── APIClient.swift        # HTTP JSON-RPC 客户端（含 settings/credentials）
+│   │   ├── APIClient.swift        # HTTP JSON-RPC 客户端
 │   │   └── StreamClient.swift     # WebSocket mux 流式客户端
 │   ├── ViewModels/
-│   │   ├── ChatViewModel.swift    # follow 流折叠 + 流式渲染
-│   │   └── SettingsViewModel.swift # 设置加载/保存（修订冲突保护）+ 凭证
+│   │   └── ChatViewModel.swift    # 无头 follow 流引擎（通知/灵动岛驱动）
+│   ├── Support/
+│   │   ├── NotificationManager.swift # 本地通知 + 通知点击路由
+│   │   ├── ActivityManager.swift     # 实时活动（灵动岛）管理器
+│   │   └── SessionWatcher.swift      # 后台会话跟随器（轮询运行中会话）
 │   └── Views/
 │       ├── SetupView.swift        # 配对 / 服务器设置（含扫码配对）
 │       ├── QRScannerView.swift    # VisionKit 二维码扫描（配对用）
-│       ├── SessionListView.swift  # 会话列表
-│       ├── ChatView.swift         # 聊天界面
-│       ├── SettingsView.swift     # 设置页（配对入口 + 全量设置 + 凭证）
-│       ├── SchemaFormView.swift   # 通用 schema 驱动设置表单
-│       └── WebConsoleView.swift   # 完整 Web 界面（WKWebView 内嵌官方 DSH Web）
+│       ├── WebConsoleView.swift   # App 主界面：WKWebView 承载官方 DSH Web + 移动端适配
+│       └── WebShellControlSheet.swift # App 控制面板（通知/灵动岛/会话关注）
+├── DSHMobileWidgets/              # 灵动岛 / 锁屏 Widget 扩展
+│   ├── TaskProgressAttributes.swift
+│   └── TaskProgressLiveActivity.swift
 ├── scripts/
 │   ├── make-unsigned-ipa.sh       # 未签名 IPA 构建
 │   └── verify-all.sh              # 本机验证套件
