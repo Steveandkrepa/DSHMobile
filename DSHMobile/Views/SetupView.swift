@@ -43,7 +43,7 @@ struct SetupView: View {
                 }
 
                 Section("服务器地址") {
-                    TextField("局域网地址（如 http://192.168.0.142:3080）", text: $lanURL)
+                    TextField("局域网地址（如 http://192.168.1.100:3080）", text: $lanURL)
                         .keyboardType(.URL)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
@@ -232,8 +232,7 @@ struct SetupView: View {
                 errorMessage = resp.code ?? "配对失败（服务器拒绝了令牌）"
                 return
             }
-            settings.save(lanURL: lanURL, publicURL: publicURL, deviceId: deviceId)
-            if mode == .settings { dismiss() }
+            await completePair(base: base, deviceId: deviceId)
         } catch {
             // 公网失败 → 尝试局域网
             if let lan = URL(string: lanURL), lan.scheme != nil {
@@ -243,8 +242,7 @@ struct SetupView: View {
                         errorMessage = resp.code ?? "配对失败（服务器拒绝了令牌）"
                         return
                     }
-                    settings.save(lanURL: lanURL, publicURL: publicURL, deviceId: deviceId)
-                    if mode == .settings { dismiss() }
+                    await completePair(base: settings.normalized(lanURL), deviceId: deviceId)
                     return
                 } catch {
                     errorMessage = error.localizedDescription
@@ -253,6 +251,24 @@ struct SetupView: View {
                 errorMessage = error.localizedDescription
             }
         }
+    }
+
+    /// 配对成功后：向服务器要回局域网/公网地址，自动补全缺失项再保存。
+    /// 这样扫码一次即可配好「公网 + 局域网」双地址，不依赖配对链接里是否带 lan/pub 参数。
+    @MainActor
+    private func completePair(base: String, deviceId: String) async {
+        var finalLan = lanURL
+        var finalPub = publicURL
+        if let info = await settings.fetchPairStatus(base: base) {
+            if finalLan.isEmpty, let lan = settings.deriveLanURL(from: info, fallbackPort: URL(string: base)?.port) {
+                finalLan = lan
+            }
+            if finalPub.isEmpty, let pub = info.publicUrl, !pub.isEmpty {
+                finalPub = pub
+            }
+        }
+        settings.save(lanURL: finalLan, publicURL: finalPub, deviceId: deviceId)
+        if mode == .settings { dismiss() }
     }
 }
 

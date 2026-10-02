@@ -120,9 +120,11 @@ struct WebConsoleView: View {
     // MARK: - 准备 URL + 注入设备 cookie
 
     private func prepareURL() async {
-        guard let base = settings.webConsoleBaseURL(),
+        // 局域网优先自动探测：手动填了局域网地址时应走局域网直连（延迟低），
+        // 局域网不可达时自动回落公网，避免 Web 壳永远走公网导致「局域网不生效」。
+        guard let base = await settings.detectActiveBaseURL(),
               let baseURL = URL(string: base) else {
-            loadError = "未配置服务器地址，请先在「配对与服务器设置」中完成配对。"
+            loadError = "连不上 DSH 服务器（局域网与公网都不可达），请检查网络或重新配对。"
             return
         }
         let target = baseURL.appendingPathComponent("pair-app")

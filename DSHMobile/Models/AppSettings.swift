@@ -11,6 +11,23 @@
 import Foundation
 import SwiftUI
 
+/// GET /api/pair/status 响应（含服务器局域网/公网地址信息）
+struct PairStatusInfo: Codable {
+    let ok: Bool?
+    let lanAvailable: Bool?
+    let lanAddresses: [String]?
+    let publicUrl: String?
+    let posture: Posture?
+
+    struct Posture: Codable {
+        let hosts: [Host]?
+    }
+    struct Host: Codable {
+        let host: String?
+        let exposed: Bool?
+    }
+}
+
 @MainActor
 final class AppSettings: ObservableObject {
     // MARK: - 持久化键
@@ -155,15 +172,45 @@ final class AppSettings: ObservableObject {
         }
     }
 
-    /// 配对 API 的 base（配对端点必须走根路径 /api/pair/*，不经过 /remote 镜像）
-    func pairingBase() -> String? {
-        if !publicURL.isEmpty { return normalized(publicURL) }
-        if !lanURL.isEmpty { return normalized(lanURL) }
-        return nil
+    // MARK: - 服务器信息（配对成功后自动补全双地址）
+
+    /// 拉取服务器配对状态（含局域网/公网地址信息）；失败返回 nil。
+    func fetchPairStatus(base: String) async -> PairStatusInfo? {
+        guard let url = URL(string: "\(normalized(base))/api/pair/status") else { return nil }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 5
+        request.httpMethod = "GET"
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            if let http = response as? HTTPURLResponse, (200...499).contains(http.statusCode) {
+                return try? JSONDecoder().decode(PairStatusInfo.self, from: data)
+            }
+            return nil
+        } catch {
+            return nil
+        }
     }
 
-    /// 完整 Web 界面的 base（公网优先，与 web 设备 cookie 域名保持一致）
-    func webConsoleBaseURL() -> String? {
+    /// 从服务器信息推导局域网 URL（http://<ip>:<port>）：
+    /// 优先取 posture.hosts 里以局域网 IP 开头的完整 host（如 "192.168.1.100:3080"），
+    /// 否则用局域网 IP + 配对 base 的端口，最后兜底 3080。
+    func deriveLanURL(from info: PairStatusInfo, fallbackPort: Int?) -> String? {
+        guard let lanIP = info.lanAddresses?.first, !lanIP.isEmpty else { return nil }
+        if let hosts = info.posture?.hosts {
+            for h in hosts {
+                guard let host = h.host else { continue }
+                // 形如 "192.168.1.100:3080"（或裸 IP）
+                if host == lanIP || host.hasPrefix(lanIP + ":") {
+                    return "http://" + host
+                }
+            }
+        }
+        let port = fallbackPort ?? 3080
+        return "http://\(lanIP):\(port)"
+    }
+
+    /// 配对 API 的 base（配对端点必须走根路径 /api/pair/*，不经过 /remote 镜像）
+    func pairingBase() -> String? {
         if !publicURL.isEmpty { return normalized(publicURL) }
         if !lanURL.isEmpty { return normalized(lanURL) }
         return nil
