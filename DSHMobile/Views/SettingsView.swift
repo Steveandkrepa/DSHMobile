@@ -65,6 +65,20 @@ struct SettingsView: View {
 
                 // 2. DSH 设置全量
                 Section {
+                    // 完整 Web 界面入口（官方 web 功能一个不少）
+                    NavigationLink {
+                        WebConsoleView()
+                            .environmentObject(settings)
+                    } label: {
+                        HStack {
+                            Label("完整 Web 设置", systemImage: "globe")
+                            Spacer()
+                            Text("全部功能")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
                     switch viewModel.loadState {
                     case .idle, .loading:
                         HStack(spacing: 8) {
@@ -96,7 +110,7 @@ struct SettingsView: View {
                 } header: {
                     Text("DSH 设置")
                 } footer: {
-                    Text("共 \(viewModel.namespaces.count) 个命名空间，全部经由配对通道读写（与浏览器端设置一致）。")
+                    Text("「完整 Web 设置」打开官方界面，覆盖全部命名空间与凭证；下方为 App 内轻量版（部分复杂设置项可能无法渲染）。")
                 }
 
                 // 3. 凭证管理

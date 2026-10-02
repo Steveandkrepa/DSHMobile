@@ -14,7 +14,10 @@ struct SessionListView: View {
     @State private var isLoading = false
     @State private var errorMessage: String?
     @State private var showSettings = false
+    @State private var showWebConsole = false
     @State private var hasLoaded = false
+    /// 通知点击 → 要打开的会话（fullScreenCover 呈现，避免与导航栈冲突）
+    @State private var notificationSession: NotificationSession?
 
     var body: some View {
         NavigationStack {
@@ -36,6 +39,28 @@ struct SessionListView: View {
             .sheet(isPresented: $showSettings) {
                 SettingsView()
                     .environmentObject(settings)
+            }
+            .sheet(isPresented: $showWebConsole) {
+                NavigationStack {
+                    WebConsoleView()
+                        .environmentObject(settings)
+                }
+            }
+            .fullScreenCover(item: $notificationSession) { target in
+                NavigationStack {
+                    ChatView(sessionId: target.sessionId)
+                        .environmentObject(settings)
+                        .toolbar {
+                            ToolbarItem(placement: .topBarLeading) {
+                                Button("关闭") { notificationSession = nil }
+                            }
+                        }
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: NotificationRouter.openSession)) { note in
+                if let sid = note.userInfo?["sessionId"] as? String {
+                    notificationSession = NotificationSession(sessionId: sid)
+                }
             }
             .alert("出错了", isPresented: Binding(
                 get: { errorMessage != nil },
@@ -68,6 +93,25 @@ struct SessionListView: View {
                     } label: {
                         SessionRow(session: session)
                     }
+                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                        ForEach(WatchLevel.allCases, id: \.self) { level in
+                            Button {
+                                settings.setWatchLevel(level, for: session.sessionId)
+                            } label: {
+                                Label(level.title, systemImage: level.systemImage)
+                            }
+                            .tint(level.tint)
+                        }
+                    }
+                    .contextMenu {
+                        ForEach(WatchLevel.allCases, id: \.self) { level in
+                            Button {
+                                settings.setWatchLevel(level, for: session.sessionId)
+                            } label: {
+                                Label(level.title, systemImage: level == settings.watchLevel(for: session.sessionId) ? "checkmark" : level.systemImage)
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -83,6 +127,14 @@ struct SessionListView: View {
                 Image(systemName: "gearshape")
             }
             .accessibilityLabel("设置")
+        }
+        ToolbarItem(placement: .topBarTrailing) {
+            Button {
+                showWebConsole = true
+            } label: {
+                Image(systemName: "globe")
+            }
+            .accessibilityLabel("完整 Web 界面")
         }
         ToolbarItem(placement: .topBarTrailing) {
             Button {
@@ -194,4 +246,10 @@ private struct SessionRow: View {
         }
         return s
     }
+}
+
+/// 通知点击 → 跳转会话 的可识别包装（fullScreenCover(item:) 需要 Identifiable）
+private struct NotificationSession: Identifiable {
+    let id = UUID()
+    let sessionId: String
 }

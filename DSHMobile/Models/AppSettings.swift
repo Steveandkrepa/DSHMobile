@@ -9,6 +9,7 @@
 //      HTTP 请求作为 x-dsh-remote-device 头、WebSocket 作为 ?device= 查询参数。
 // ============================================================================
 import Foundation
+import SwiftUI
 
 @MainActor
 final class AppSettings: ObservableObject {
@@ -161,11 +162,73 @@ final class AppSettings: ObservableObject {
         return nil
     }
 
+    /// 完整 Web 界面的 base（公网优先，与 web 设备 cookie 域名保持一致）
+    func webConsoleBaseURL() -> String? {
+        if !publicURL.isEmpty { return normalized(publicURL) }
+        if !lanURL.isEmpty { return normalized(lanURL) }
+        return nil
+    }
+
     /// 带临时表单值的配对 base（供 SetupView 使用）
     func pairingBase(for lan: String, publicURL pub: String) -> String? {
         let lan = normalized(lan), pub = normalized(pub)
         if !pub.isEmpty { return pub }
         if !lan.isEmpty { return lan }
         return nil
+    }
+
+    // MARK: - 会话级通知关注
+
+    /// 关注级别变更的版本号（@Published 驱动列表刷新；值本身无意义）
+    @Published private(set) var watchLevelsRevision = 0
+
+    /// 指定会话的通知关注级别；未设置过 → 跟随全局
+    func watchLevel(for sessionId: String) -> WatchLevel {
+        let key = "session.watch.\(sessionId)"
+        guard let raw = defaults.string(forKey: key) else { return .global }
+        return WatchLevel(rawValue: raw) ?? .global
+    }
+
+    /// 设置会话的通知关注级别
+    func setWatchLevel(_ level: WatchLevel, for sessionId: String) {
+        let key = "session.watch.\(sessionId)"
+        defaults.set(level.rawValue, forKey: key)
+        watchLevelsRevision &+= 1
+    }
+}
+
+/// 会话级通知关注级别
+enum WatchLevel: String, CaseIterable, Identifiable {
+    /// 跟随全局：按全局通知开关与规则推送
+    case global
+    /// 特别关注：全局开启时必定提醒；App 在前台也弹横幅（强化提醒）
+    case focused
+    /// 静音：该会话一律不推通知（灵动岛进度照常显示）
+    case muted
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .global: return "跟随全局"
+        case .focused: return "特别关注"
+        case .muted: return "静音"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .global: return "bell"
+        case .focused: return "bell.badge.fill"
+        case .muted: return "bell.slash"
+        }
+    }
+
+    var tint: Color {
+        switch self {
+        case .global: return .secondary
+        case .focused: return .orange
+        case .muted: return .gray
+        }
     }
 }

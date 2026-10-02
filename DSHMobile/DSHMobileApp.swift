@@ -6,10 +6,17 @@
 //    · 已配对 → SessionListView（会话列表 → 聊天）
 // ============================================================================
 import SwiftUI
+import UserNotifications
 
 @main
 struct DSHMobileApp: App {
     @StateObject private var settings = AppSettings.shared
+
+    init() {
+        // 注册通知点击路由（常驻 delegate），通知点击 → 跳转对应会话
+        let center = UNUserNotificationCenter.current()
+        center.delegate = NotificationRouter.shared
+    }
 
     var body: some Scene {
         WindowGroup {

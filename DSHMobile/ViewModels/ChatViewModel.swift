@@ -512,11 +512,19 @@ final class ChatViewModel: ObservableObject {
         return nil
     }
 
-    /// App 不在前台时才发本地通知（前台聊天时弹通知很吵）
+    /// 推送本地通知。
+    /// 规则（会话级关注优先，再叠加全局开关）：
+    ///   · 会话「静音」→ 一律不推；
+    ///   · 会话「特别关注」→ 全局开启时必定推，即使 App 在前台；
+    ///   · 否则（跟随全局）→ 仅全局开启且 App 不在前台时推。
     private func notifyIfBackgrounded(title: String, body: String) {
         guard settings.notificationsEnabled else { return }
-        let isForeground = UIApplication.shared.applicationState == .active
-        guard !isForeground else { return }
+        let level = settings.watchLevel(for: sessionId)
+        guard level != .muted else { return }
+        if level != .focused {
+            let isForeground = UIApplication.shared.applicationState == .active
+            guard !isForeground else { return }
+        }
         Task { @MainActor in
             let status = await NotificationManager.shared.authorizationStatus()
             // 未决定时顺手请求一次授权；已拒绝就静默跳过（不再打扰）
@@ -526,7 +534,12 @@ final class ChatViewModel: ObservableObject {
                 }
                 return
             }
-            NotificationManager.shared.notify(title: title, body: body)
+            NotificationManager.shared.notify(
+                title: title,
+                body: body,
+                identifier: nil,
+                userInfo: ["sessionId": sessionId]
+            )
         }
     }
 
