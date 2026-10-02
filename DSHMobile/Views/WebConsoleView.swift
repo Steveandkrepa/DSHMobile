@@ -230,6 +230,12 @@ final class Coordinator: NSObject, WKNavigationDelegate {
         webView?.reload()
     }
 
+    /// 下拉刷新 target-action（UIRefreshControl 挂在滚动视图上）
+    @objc func didPullRefresh(_ sender: UIRefreshControl) {
+        reload()
+        sender.endRefreshing()
+    }
+
     // MARK: WKNavigationDelegate
 
     nonisolated func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
@@ -310,7 +316,7 @@ struct WebViewRepresentable: UIViewRepresentable {
         webView.scrollView.refreshControl = UIRefreshControl()
         webView.scrollView.refreshControl?.addTarget(
             context.coordinator,
-            action: #selector(WebViewCoordinator.didPullRefresh(_:)),
+            action: #selector(Coordinator.didPullRefresh(_:)),
             for: .valueChanged
         )
         context.coordinator.attach(webView)
@@ -336,7 +342,7 @@ extension WebViewCoordinator {
     }
 }
 
-/// 工具类型：承载移动端适配 JS 与下拉刷新的 target action。
+/// 工具类型：承载移动端适配 JS（WKUserScript 注入源）与 cookie store 访问。
 enum WebViewCoordinator {
     /// 移动端响应式适配脚本（幂等：window 标志位防重复执行）。
     /// 处理 iPhone 直访 web UI 的三大问题：拥挤、点不到、元素消失。
@@ -379,11 +385,4 @@ enum WebViewCoordinator {
       injectStyle();
     })();
     """
-
-    @objc static func didPullRefresh(_ sender: UIRefreshControl) {
-        Task { @MainActor in
-            // 只负责结束下拉动画；刷新动作由 WebViewRepresentable 的 coordinator 处理
-            sender.endRefreshing()
-        }
-    }
 }
