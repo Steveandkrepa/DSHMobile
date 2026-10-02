@@ -161,16 +161,22 @@ final class StreamClient {
         }
     }
 
+    /// 服务端 RemoteStreamMuxConnection 只接受文本帧，任何二进制帧都会触发
+    /// close 1003 "text messages required"。因此所有上行帧必须转成 UTF-8 文本再发。
     private func send(data: Data) async throws {
         guard let task else { throw StreamError.notConnected }
-        try await task.send(.data(data))
+        guard let text = String(data: data, encoding: .utf8) else {
+            throw StreamError.notConnected
+        }
+        try await task.send(.string(text))
     }
 
     func cancelStream(streamId: String) {
         guard let task else { return }
         let frame: [String: Any] = ["type": "cancel", "streamId": streamId]
-        if let data = try? JSONSerialization.data(withJSONObject: frame) {
-            Task { try? await task.send(.data(data)) }
+        if let data = try? JSONSerialization.data(withJSONObject: frame),
+           let text = String(data: data, encoding: .utf8) {
+            Task { try? await task.send(.string(text)) }
         }
     }
 

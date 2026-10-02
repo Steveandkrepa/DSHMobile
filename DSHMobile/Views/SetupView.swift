@@ -153,7 +153,7 @@ struct SetupView: View {
                 HelpSheet()
             }
             .fullScreenCover(isPresented: $showingScanner) {
-                QRScannerContainer(token: $token, publicURL: $publicURL, autoPair: {
+                QRScannerContainer(token: $token, lanURL: $lanURL, publicURL: $publicURL, autoPair: {
                     // 地址已填好才自动发起配对；否则只填 token，等用户补地址后手动点配对
                     if !lanURL.isEmpty || !publicURL.isEmpty {
                         Task { await pair() }
@@ -169,19 +169,30 @@ struct SetupView: View {
             && (!lanURL.isEmpty || !publicURL.isEmpty)
     }
 
-    /// 从二维码载荷中提取配对信息：
-    ///   https://<id>.dsh-market.com/pair-accept?pair=<token>
-    ///     → token = pair 参数，publicURL = https://<id>.dsh-market.com（隧道域名即公网地址）
-    ///   裸 token / 其他格式 → 原样 trim 后返回
-    static func parse(_ payload: String) -> (token: String, publicURL: String?) {
+    /// 从二维码载荷中提取配对信息。支持的载荷格式：
+    ///   1. 官方配对链接（含可选 lan/pub 扩展参数）：
+    ///      https://<public>.dsh-market.com/pair-accept?pair=<token>&lan=<urlencoded>&pub=<urlencoded>
+    ///        → token = pair 参数；lan/pub 显式给出局域网与公网地址；
+    ///        → 无 lan/pub 时兜底：publicURL = scheme://host（隧道域名即公网地址）
+    ///   2. 裸 token / 其他格式 → 原样 trim 后返回
+    static func parse(_ payload: String) -> (token: String, publicURL: String?, lanURL: String?) {
         let trimmed = payload.trimmingCharacters(in: .whitespacesAndNewlines)
         var token: String?
         var publicURL: String?
+        var lanURL: String?
         if let comps = URLComponents(string: trimmed) {
-            if let pair = comps.queryItems?.first(where: { $0.name == "pair" })?.value, !pair.isEmpty {
+            let items = comps.queryItems ?? []
+            if let pair = items.first(where: { $0.name == "pair" })?.value, !pair.isEmpty {
                 token = pair
             }
-            if let scheme = comps.scheme, let host = comps.host, !host.isEmpty {
+            if let lan = items.first(where: { $0.name == "lan" })?.value, !lan.isEmpty {
+                lanURL = lan.removingPercentEncoding ?? lan
+            }
+            if let pub = items.first(where: { $0.name == "pub" })?.value, !pub.isEmpty {
+                publicURL = pub.removingPercentEncoding ?? pub
+            }
+            // 兜底：没有 pub 参数时，用链接主机推导公网地址
+            if publicURL == nil, let scheme = comps.scheme, let host = comps.host, !host.isEmpty {
                 publicURL = "\(scheme)://\(host)"
             }
         }
@@ -194,7 +205,7 @@ struct SetupView: View {
                 if !t.isEmpty { token = t }
             }
         }
-        return (token ?? trimmed, publicURL)
+        return (token ?? trimmed, publicURL, lanURL)
     }
 
     @MainActor
@@ -247,9 +258,10 @@ struct SetupView: View {
 
 // MARK: - 扫码配对容器
 
-/// 全屏扫码：VisionKit 相机 + 右上角关闭按钮；扫到后自动提取 token 并填入公网地址，随后触发配对
+/// 全屏扫码：VisionKit 相机 + 右上角关闭按钮；扫到后自动提取 token 并填入局域网/公网地址，随后触发配对
 private struct QRScannerContainer: View {
     @Binding var token: String
+    @Binding var lanURL: String
     @Binding var publicURL: String
     /// 令牌填好后自动发起配对
     var autoPair: () -> Void
@@ -279,6 +291,9 @@ private struct QRScannerContainer: View {
     private func handleScan(_ payload: String) {
         let parsed = SetupView.parse(payload)
         token = parsed.token
+        if let lan = parsed.lanURL, !lan.isEmpty, lanURL.isEmpty {
+            lanURL = lan
+        }
         if let pub = parsed.publicURL, !pub.isEmpty, publicURL.isEmpty {
             publicURL = pub
         }
