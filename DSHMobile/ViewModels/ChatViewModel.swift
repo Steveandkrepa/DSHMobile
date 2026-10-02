@@ -2,7 +2,7 @@
 //  ChatViewModel.swift — 聊天会话的视图模型
 //  ----------------------------------------------------------------------------
 //  职责：
-//    · 维护会话的持久 follow 流（WebSocket mux，endpoint session.follow），
+//    · 维护会话的持久 follow 流（WebSocket mux，endpoint session/follow），
 //      断线指数退避自动重连，用 cursor 续传避免重复。
 //    · 把 durable 事件（user/message、assistant/message、session/title …）折叠成
 //      聊天消息列表。
@@ -85,13 +85,15 @@ final class ChatViewModel: ObservableObject {
             do {
                 try await client.connect()
                 connState = .connected
-                let payload: [String: Any] = [
+                // session/follow 的请求体（typert gateway：args 内层字段名=服务端参数名）
+                let request: [String: Any] = [
                     "address": ["kind": "session", "sessionId": sessionId],
                     "cursor": cursor,
                     "maxMessages": 50,
                     "assistantStream": true,
                 ]
-                try await client.openStream(endpoint: "session.follow", payload: payload) { [weak self] frame in
+                let payload: [String: Any] = ["args": ["request": request]]
+                try await client.openStream(endpoint: "session/follow", payload: payload) { [weak self] frame in
                     self?.handleStreamFrame(frame)
                 }
                 // 正常 end：流被服务端关闭 → 重连

@@ -9,6 +9,11 @@
 - 📶 **智能路由**：自动检测——同一 WiFi 下走局域网直连（低延迟），否则走公网中转（Cloudflare 隧道）
 - 💬 **实时聊天**：基于 DSH 的 WebSocket mux 流式协议，流式增量渲染（支持思考过程折叠 / 工具调用展示）
 - 📋 **会话管理**：浏览历史会话、新建会话、取消生成
+- ⚙️ **完全权限 = 本机访问**：配对设备凭证走 DSH 官方 `/remote` 镜像通道，与浏览器端一样读写全部 RPC——
+  会话、设置（全部 35 个命名空间）、凭证全部可达（仅配对/更新/插件管理三个控制面物理本地不可达）
+- 🎛️ **全量设置界面**：schema 驱动通用表单，覆盖 DSH Web「设置」页全部命名空间
+  （文本 / 数字 / 开关 / 枚举 / 对象分组 / 数组列表 / 键值映射 / JSON 编辑），保存带修订冲突保护
+- 🔑 **凭证管理**：查看 / 添加 / 清除模型 API Key 等凭证（不显示明文）
 - 🍎 **无需越狱**：产物是未签名 IPA，用 [SideStore](https://sidestore.io) 免费 Apple ID 重签安装
 - 📱 **iOS 17+**：SwiftUI 原生实现，适配 iPhone 与 iPad
 
@@ -56,16 +61,20 @@ DSHMobile/
 │   ├── DSHMobileApp.swift         # App 入口 + 根视图分流
 │   ├── Models/
 │   │   ├── DSHModels.swift        # 与 DSH 线上协议对齐的数据模型
+│   │   ├── SettingsModels.swift   # 设置（schemastery schema）数据模型
 │   │   └── AppSettings.swift      # 连接配置（地址/凭证/自动检测）
 │   ├── Networking/
-│   │   ├── APIClient.swift        # HTTP JSON-RPC 客户端
+│   │   ├── APIClient.swift        # HTTP JSON-RPC 客户端（含 settings/credentials）
 │   │   └── StreamClient.swift     # WebSocket mux 流式客户端
 │   ├── ViewModels/
-│   │   └── ChatViewModel.swift    # follow 流折叠 + 流式渲染
+│   │   ├── ChatViewModel.swift    # follow 流折叠 + 流式渲染
+│   │   └── SettingsViewModel.swift # 设置加载/保存（修订冲突保护）+ 凭证
 │   └── Views/
-│       ├── SetupView.swift        # 配对 / 设置
+│       ├── SetupView.swift        # 配对 / 服务器设置
 │       ├── SessionListView.swift  # 会话列表
-│       └── ChatView.swift         # 聊天界面
+│       ├── ChatView.swift         # 聊天界面
+│       ├── SettingsView.swift     # 设置页（配对入口 + 全量设置 + 凭证）
+│       └── SchemaFormView.swift   # 通用 schema 驱动设置表单
 ├── scripts/
 │   ├── make-unsigned-ipa.sh       # 未签名 IPA 构建
 │   └── verify-all.sh              # 本机验证套件

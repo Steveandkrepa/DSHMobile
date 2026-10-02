@@ -5,8 +5,8 @@
 //  反编译自 @deepseek-ai/dsh-api-session-controller 与 @linxin666/dsh-remote-web-ui。
 //
 //  传输协议速览：
-//    · HTTP RPC   ：POST {base}/remote/api/<endpoint>
-//                   请求  {"rpcId","method","payload"}
+//    · HTTP RPC   ：POST {base}/remote/api/<endpoint>    （endpoint 用斜杠：session/list）
+//                   请求  {"type":"client-request","rpcId","method":"<ns>/<method>","payload":{"args":{...}}}
 //                   响应  {"type":"server-response","rpcId","result":{"ok","value"|"error"}}
 //    · 流式 RPC   ：WebSocket {base}/remote/api/remote.mux?device=<id>
 //                   上行  {"type":"open","streamId","endpoint","payload"}
@@ -31,14 +31,16 @@ struct PairAcceptResponse: Codable {
 
 // MARK: - HTTP RPC 信封
 
-/// 客户端 → 服务端的 RPC 请求信封
+/// 客户端 → 服务端的 RPC 请求信封（typert gateway 格式）
 struct RPCEnvelope: Encodable {
+    let type: String = "client-request"
     let rpcId: String
     let method: String
+    /// 内层必须是 {args: {...}}；args 字段名 = 服务端方法参数名（request/_request/空）
     let payload: [String: AnyCodable]
 
     enum CodingKeys: String, CodingKey {
-        case rpcId, method, payload
+        case type, rpcId, method, payload
     }
 }
 
@@ -119,6 +121,11 @@ enum AnyCodable: Codable {
 }
 
 // MARK: - 会话
+
+/// session/list 的响应（items 包一层）
+struct SessionListResponse: Decodable {
+    let items: [SessionSummary]
+}
 
 /// session.list 返回的一条会话摘要
 struct SessionSummary: Decodable, Identifiable {

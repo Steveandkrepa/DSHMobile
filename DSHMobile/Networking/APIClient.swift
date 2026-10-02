@@ -1,16 +1,17 @@
 // ============================================================================
 //  APIClient.swift — DSH HTTP JSON-RPC 客户端（纯 URLSession）
 //  ----------------------------------------------------------------------------
-//  协议（来自 @deepseek-ai/dsh-client-connection 的 rpcFetchHandler）：
-//    POST {base}/remote/api/<endpoint>
+//  协议（typert gateway，来自 @deepseek-ai/dsh-client-connection）：
+//    POST {base}/remote/api/<endpoint>       （endpoint 用斜杠：session/list、settings/describe）
 //    Headers: content-type: application/json
 //             x-dsh-remote-device: <deviceId>   （配对设备凭证）
-//    Body   : {"rpcId":"<uuid>","method":"<endpoint>","payload":{...}}
+//    Body   : {"type":"client-request","rpcId":"<uuid>","method":"<endpoint>",
+//              "payload":{"args":{<方法参数>}}}
 //    成功   : {"type":"server-response","rpcId":"...","result":{"ok":true,"value":...}}
 //    失败   : {"type":"server-response","rpcId":"...","result":{"ok":false,"error":{"name","message","code","details"}}}
 //
 //  本客户端所有业务调用走 /remote/api/* 镜像通道（与浏览器端配对设备一致），
-//  设备凭证是"全权"凭证：除配对/更新/插件管理外都能用。
+//  设备凭证是"全权"凭证：settings/credentials/session 全部可读写（除配对/更新/插件管理）。
 // ============================================================================
 import Foundation
 
@@ -41,10 +42,11 @@ struct APIClient {
 
     // MARK: - 底层 RPC
 
-    /// 发起一次 HTTP RPC；`base` 为 nil 时自动检测。
+    /// 发起一次 HTTP RPC；`args` 是 payload.args 的内层对象（字段名=服务端方法参数名）。
+    /// `base` 为 nil 时自动检测。
     func call<T: Decodable>(
         _ endpoint: String,
-        payload: [String: Any],
+        args: [String: Any],
         base: String? = nil,
         as type: T.Type
     ) async throws -> T {
@@ -62,7 +64,7 @@ struct APIClient {
         }
 
         let rpcId = UUID().uuidString
-        let body = RPCEnvelope(rpcId: rpcId, method: endpoint, payload: payload.mapValues(AnyCodable.from))
+        let body = RPCEnvelope(rpcId: rpcId, method: endpoint, payload: ["args": AnyCodable.from(args)])
         do {
             request.httpBody = try JSONEncoder().encode(body)
         } catch {
@@ -126,54 +128,104 @@ struct APIClient {
 
     // MARK: - 业务方法
 
-    /// 会话列表
+    /// 会话列表（session/list，参数 _request 留空）
     func listSessions() async throws -> [SessionSummary] {
-        let items: [SessionSummary] = try await call("session.list", payload: [:], as: [SessionSummary].self)
-        return items
+        let resp: SessionListResponse = try await call("session/list", args: ["_request": [:] as [String: Any]], as: SessionListResponse.self)
+        return resp.items
     }
 
-    /// 新建会话
+    /// 新建会话（session/create，参数 request）
     struct CreateSessionResult: Decodable {
         let sessionId: String
         let agentPreset: String?
     }
     func createSession(agentPreset: String? = nil) async throws -> CreateSessionResult {
-        var payload: [String: Any] = [:]
-        if let agentPreset { payload["agentPreset"] = agentPreset }
-        return try await call("session.create", payload: payload, as: CreateSessionResult.self)
+        var request: [String: Any] = [:]
+        if let agentPreset { request["agentPreset"] = agentPreset }
+        return try await call("session/create", args: ["request": request], as: CreateSessionResult.self)
     }
 
-    /// 发送消息（followup 模式）
+    /// 发送消息（session/prompt，参数 request；followup 模式）
     struct PromptResult: Decodable {
         let accepted: Bool
     }
     func prompt(sessionId: String, text: String, requestId: String = UUID().uuidString) async throws -> PromptResult {
         let content: [[String: Any]] = [["type": "text", "text": text]]
-        let payload: [String: Any] = [
+        let request: [String: Any] = [
             "sessionId": sessionId,
             "content": content,
             "requestId": requestId,
         ]
-        return try await call("session.prompt", payload: payload, as: PromptResult.self)
+        return try await call("session/prompt", args: ["request": request], as: PromptResult.self)
     }
 
-    /// 取消当前回合
+    /// 取消当前回合（session/cancel，参数 request）
     struct CancelResult: Decodable {
         let accepted: Bool
     }
     func cancelSession(sessionId: String) async throws -> CancelResult {
-        let payload: [String: Any] = ["sessionId": sessionId]
-        return try await call("session.cancel", payload: payload, as: CancelResult.self)
+        let request: [String: Any] = ["sessionId": sessionId]
+        return try await call("session/cancel", args: ["request": request], as: CancelResult.self)
     }
 
-    /// 重命名会话
+    /// 重命名会话（session/rename，参数 request）
     struct RenameResult: Decodable {
         let title: String
         let seq: Int
     }
     func renameSession(sessionId: String, title: String) async throws -> RenameResult {
-        let payload: [String: Any] = ["sessionId": sessionId, "title": title]
-        return try await call("session.rename", payload: payload, as: RenameResult.self)
+        let request: [String: Any] = ["sessionId": sessionId, "title": title]
+        return try await call("session/rename", args: ["request": request], as: RenameResult.self)
+    }
+
+    /// 选择模型（session/selectModel，参数 request）
+    func selectModel(sessionId: String, provider: String, model: String, reasoningEffort: String? = nil) async throws -> AnyCodable? {
+        var request: [String: Any] = ["sessionId": sessionId, "provider": provider, "model": model]
+        if let reasoningEffort { request["reasoningEffort"] = reasoningEffort }
+        return try await call("session/selectModel", args: ["request": request], as: AnyCodable?.self)
+    }
+
+    // MARK: - 设置（settings/*）
+
+    /// 读取全部设置命名空间（settings/describe，无参数）
+    func describeSettings() async throws -> SettingsDescribeValue {
+        try await call("settings/describe", args: [:], as: SettingsDescribeValue.self)
+    }
+
+    /// 部分更新一个命名空间（settings/update，参数 patch）
+    func updateSettings(ns: String, patch: [String: AnyCodable], expectedRevision: Int?) async throws -> SettingsUpdateResult {
+        var args: [String: Any] = ["ns": ns, "patch": patch]
+        if let expectedRevision { args["expectedRevision"] = expectedRevision }
+        return try await call("settings/update", args: args, as: SettingsUpdateResult.self)
+    }
+
+    /// 整体替换一个命名空间（settings/replace，参数 section）
+    func replaceSettings(ns: String, section: [String: AnyCodable], expectedRevision: Int?) async throws -> SettingsUpdateResult {
+        var args: [String: Any] = ["ns": ns, "section": section]
+        if let expectedRevision { args["expectedRevision"] = expectedRevision }
+        return try await call("settings/replace", args: args, as: SettingsUpdateResult.self)
+    }
+
+    // MARK: - 凭证（credentials/*）
+
+    /// 读取凭证（credentials/describe，参数 refs）
+    func describeCredentials(refs: [String] = []) async throws -> AnyCodable? {
+        try await call("credentials/describe", args: ["refs": refs], as: AnyCodable?.self)
+    }
+
+    /// 设置凭证（credentials/set，参数 ref + value）
+    func setCredential(ref: String, value: Any) async throws -> AnyCodable? {
+        try await call("credentials/set", args: ["ref": ref, "value": value], as: AnyCodable?.self)
+    }
+
+    /// 清除凭证（credentials/unset，参数 ref）
+    func unsetCredential(ref: String) async throws -> AnyCodable? {
+        try await call("credentials/unset", args: ["ref": ref], as: AnyCodable?.self)
+    }
+
+    /// 模型目录（session/modelCatalog，无参数）
+    func modelCatalog() async throws -> AnyCodable? {
+        try await call("session/modelCatalog", args: [:], as: AnyCodable?.self)
     }
 
     /// 配对：用一次性 token 换取 deviceId

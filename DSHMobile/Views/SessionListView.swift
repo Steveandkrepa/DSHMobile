@@ -33,7 +33,8 @@ struct SessionListView: View {
             .navigationTitle("会话")
             .toolbar { toolbarContent }
             .sheet(isPresented: $showSettings) {
-                SetupView(mode: .settings)
+                SettingsView()
+                    .environmentObject(settings)
             }
             .alert("出错了", isPresented: Binding(
                 get: { errorMessage != nil },
@@ -77,6 +78,7 @@ struct SessionListView: View {
             } label: {
                 Image(systemName: "gearshape")
             }
+            .accessibilityLabel("设置")
         }
         ToolbarItem(placement: .topBarTrailing) {
             Button {
