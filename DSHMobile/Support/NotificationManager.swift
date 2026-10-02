@@ -3,8 +3,9 @@ import UserNotifications
 
 /// 通知点击 → 打开对应会话的路由。
 /// 作为 UNUserNotificationCenter.delegate 常驻（在 App 入口注册），
-/// 收到通知点击后把 sessionId 广播到 NotificationCenter，
-/// 由 SessionListView 观察并跳转。
+/// 收到通知点击后把 sessionId 广播到 NotificationCenter。
+/// 当前主界面是 Web 壳（SPA 深链路由随版本变化），点击通知把 App 带回前台
+/// 即可看到对应会话；sessionId 广播保留给未来的原生深链。
 @MainActor
 final class NotificationRouter: NSObject, UNUserNotificationCenterDelegate {
     static let openSession = Notification.Name("dsh.openSession")

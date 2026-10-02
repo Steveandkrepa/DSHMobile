@@ -188,43 +188,7 @@ struct APIClient {
         return try await call("session/selectModel", args: ["request": request], as: AnyCodable?.self)
     }
 
-    // MARK: - 设置（settings/*）
-
-    /// 读取全部设置命名空间（settings/describe，无参数）
-    func describeSettings() async throws -> SettingsDescribeValue {
-        try await call("settings/describe", args: [:], as: SettingsDescribeValue.self)
-    }
-
-    /// 部分更新一个命名空间（settings/update，参数 patch）
-    func updateSettings(ns: String, patch: [String: AnyCodable], expectedRevision: Int?) async throws -> SettingsUpdateResult {
-        var args: [String: Any] = ["ns": ns, "patch": patch]
-        if let expectedRevision { args["expectedRevision"] = expectedRevision }
-        return try await call("settings/update", args: args, as: SettingsUpdateResult.self)
-    }
-
-    /// 整体替换一个命名空间（settings/replace，参数 section）
-    func replaceSettings(ns: String, section: [String: AnyCodable], expectedRevision: Int?) async throws -> SettingsUpdateResult {
-        var args: [String: Any] = ["ns": ns, "section": section]
-        if let expectedRevision { args["expectedRevision"] = expectedRevision }
-        return try await call("settings/replace", args: args, as: SettingsUpdateResult.self)
-    }
-
-    // MARK: - 凭证（credentials/*）
-
-    /// 读取凭证（credentials/describe，参数 refs）
-    func describeCredentials(refs: [String] = []) async throws -> AnyCodable? {
-        try await call("credentials/describe", args: ["refs": refs], as: AnyCodable?.self)
-    }
-
-    /// 设置凭证（credentials/set，参数 ref + value）
-    func setCredential(ref: String, value: Any) async throws -> AnyCodable? {
-        try await call("credentials/set", args: ["ref": ref, "value": value], as: AnyCodable?.self)
-    }
-
-    /// 清除凭证（credentials/unset，参数 ref）
-    func unsetCredential(ref: String) async throws -> AnyCodable? {
-        try await call("credentials/unset", args: ["ref": ref], as: AnyCodable?.self)
-    }
+    // MARK: - 模型目录（session/modelCatalog）
 
     /// 模型目录（session/modelCatalog，无参数）
     func modelCatalog() async throws -> AnyCodable? {

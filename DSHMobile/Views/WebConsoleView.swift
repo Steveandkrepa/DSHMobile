@@ -1,66 +1,95 @@
 // ============================================================================
-//  WebConsoleView.swift — 完整 Web 界面（WKWebView 承载官方 DSH Web）
+//  WebConsoleView.swift — App 主界面（App 化 Web 壳，承载官方 DSH Web）
 //  ----------------------------------------------------------------------------
-//  背景：
-//    纯 Swift 的 schema 表单无法覆盖 web 的全部设置/凭证/模型管理等功能，
-//    因此 App 内嵌官方 DSH Web 界面作为「完整功能」入口——web 功能一个不少。
+//  目标：像拼多多那样的「网页内容 + App 体验」——官方 DSH Web 即 App 主体，
+//  全屏沉浸式 WKWebView：无地址栏、无浏览器工具栏，顶部细进度条 + 下拉刷新。
 //
-//  身份注入（关键）：
-//    远程设备的 web 界面靠 dsh_pair cookie（= deviceId）被服务端识别为
-//    「已配对设备」，从而放行 /remote 受控通道并渲染官方 GUI（/pair-app）。
-//    App 原生配对已持有有效 deviceId，加载前把它以 dsh_pair cookie 注入
-//    WKWebView 的 cookie store，即可免重新扫码、免消耗新 token 直接进入。
-//    若 deviceId 已被撤销/过期，web 会显示配对失败页，此时引导重新配对。
+//  移动端适配（关键，解决 iPhone 直访拥挤/点不到/元素消失）：
+//    加载前注入 WKUserScript（documentStart）+ 加载完成后再次 evaluate：
+//      · 强制 viewport = device-width（禁止缩放，避免 iOS 自动放大）
+//      · overflow-x: hidden 防横向溢出裁切（元素「消失」的根因之一）
+//      · 输入控件 16px 字号（iOS 聚焦时自动放大导致「点不到」）
+//      · 触控目标 ≥40px + touch-action: manipulation（去双击延迟）
+//
+//  身份注入：
+//    远程设备靠 dsh_pair cookie（= deviceId）被服务端识别为已配对设备。
+//    App 原生配对已持有有效 deviceId，加载前以 dsh_pair cookie 注入
+//    WKWebView 的 cookie store，免重新扫码直接进入官方 GUI（/pair-app）。
+//    若 deviceId 失效，web 显示配对失败页 → 引导重新配对。
+//
+//  控制入口：右下角悬浮齿轮 → WebShellControlSheet（通知/灵动岛/会话关注/
+//    服务器与配对），原生能力集中管理。
 // ============================================================================
 import SwiftUI
 import WebKit
 
 struct WebConsoleView: View {
     @EnvironmentObject var settings: AppSettings
-    @Environment(\.dismiss) private var dismiss
 
     @State private var url: URL?
-    @State private var isLoading = true
     @State private var loadError: String?
     @State private var pairingFailed = false
-
-    /// 供 WKWebView 刷新用
-    @State private var reloadToken = 0
+    @State private var isLoaded = false
+    @State private var progress: Double = 0
+    @State private var showControlSheet = false
+    @State private var showSetup = false
 
     private let coordinator = Coordinator()
 
     var body: some View {
-        VStack(spacing: 0) {
-            // 顶部工具条：地址 + 导航
-            toolbarBar
-            Divider()
-
+        Group {
             if loadError != nil {
                 errorView
             } else if pairingFailed {
                 pairingFailedView
-            } else {
+            } else if let url {
                 WebViewRepresentable(
                     url: url,
-                    reloadToken: reloadToken,
-                    coordinator: coordinator
+                    coordinator: coordinator,
+                    onProgress: { progress = $0 },
+                    onLoaded: { isLoaded = true }
                 )
-                .overlay(alignment: .bottom) {
-                    if isLoading {
-                        ProgressView()
-                            .padding(.vertical, 6)
-                            .frame(maxWidth: .infinity)
-                            .background(.thinMaterial)
+                .ignoresSafeArea(edges: .all)
+                .overlay(alignment: .top) {
+                    // 细进度条：仅加载中显示
+                    if progress < 1 {
+                        ProgressView(value: progress)
+                            .progressViewStyle(.linear)
+                            .tint(.purple)
+                            .frame(height: 2)
+                            .opacity(isLoaded ? 0 : 1)
+                            .allowsHitTesting(false)
                     }
                 }
+                .overlay(alignment: .bottomTrailing) {
+                    // 右下角悬浮控制按钮（App 感）
+                    Button {
+                        showControlSheet = true
+                    } label: {
+                        Image(systemName: "gearshape.fill")
+                            .font(.system(size: 17, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .frame(width: 48, height: 48)
+                            .background(.ultraThinMaterial, in: Circle())
+                            .overlay(Circle().strokeBorder(.white.opacity(0.25)))
+                    }
+                    .padding(.trailing, 16)
+                    .padding(.bottom, 20)
+                    .accessibilityLabel("App 控制")
+                    .shadow(color: .black.opacity(0.25), radius: 6, y: 3)
+                }
+            } else {
+                ProgressView("正在连接…")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .navigationTitle("完整 Web 界面")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .cancellationAction) {
-                Button("关闭") { dismiss() }
-            }
+        .sheet(isPresented: $showControlSheet) {
+            WebShellControlSheet(onReload: { coordinator.reload() })
+                .environmentObject(settings)
+        }
+        .fullScreenCover(isPresented: $showSetup) {
+            SetupView(mode: .settings)
+                .environmentObject(settings)
         }
         .task {
             coordinator.onLoadError = { msg in
@@ -68,17 +97,25 @@ struct WebConsoleView: View {
                     loadError = msg
                 }
             }
+            coordinator.onPairingFailed = {
+                Task { @MainActor in
+                    pairingFailed = true
+                }
+            }
             await prepareURL()
         }
-        .onChange(of: coordinator.pairingFailed) { _, failed in
-            if failed { pairingFailed = true }
+        // 重新配对后 deviceId 变化 → 重新注入 cookie 并强制刷新
+        .onChange(of: settings.deviceId) { _, _ in
+            Task {
+                await prepareURL()
+                coordinator.reload()
+            }
         }
     }
 
     // MARK: - 准备 URL + 注入设备 cookie
 
     private func prepareURL() async {
-        // 1. 确定 base：公网优先（隧道域名与 cookie 域名一致），否则局域网
         guard let base = settings.webConsoleBaseURL(),
               let baseURL = URL(string: base) else {
             loadError = "未配置服务器地址，请先在「配对与服务器设置」中完成配对。"
@@ -86,7 +123,6 @@ struct WebConsoleView: View {
         }
         let target = baseURL.appendingPathComponent("pair-app")
 
-        // 2. 注入 dsh_pair cookie（= 已配对 deviceId），公网 + 局域网两个域名都注入
         guard !settings.deviceId.isEmpty else {
             loadError = "尚未配对设备，请先完成配对。"
             return
@@ -123,50 +159,6 @@ struct WebConsoleView: View {
 
     // MARK: - 子视图
 
-    private var toolbarBar: some View {
-        HStack(spacing: 12) {
-            Button {
-                Task { await coordinator.goBack() }
-            } label: {
-                Image(systemName: "chevron.left")
-            }
-            .disabled(!coordinator.canGoBack)
-
-            Button {
-                Task { await coordinator.goForward() }
-            } label: {
-                Image(systemName: "chevron.right")
-            }
-            .disabled(!coordinator.canGoForward)
-
-            Button {
-                Task { await coordinator.reload() }
-            } label: {
-                Image(systemName: "arrow.clockwise")
-            }
-
-            Spacer()
-
-            if let url, let scheme = url.scheme {
-                Text(displayHost(url))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-
-            Spacer()
-
-            Button {
-                openInSafari()
-            } label: {
-                Image(systemName: "safari")
-            }
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .buttonStyle(.borderless)
-    }
-
     private var errorView: some View {
         VStack(spacing: 12) {
             Image(systemName: "wifi.exclamationmark")
@@ -183,6 +175,8 @@ struct WebConsoleView: View {
                 Task { await prepareURL() }
             }
             .buttonStyle(.borderedProminent)
+            Button("服务器设置") { showSetup = true }
+                .buttonStyle(.bordered)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -193,24 +187,20 @@ struct WebConsoleView: View {
                 .font(.largeTitle)
                 .foregroundStyle(.orange)
             Text("设备配对已失效").font(.headline)
-            Text("Web 界面未识别到本机的配对身份。请在「设置 → 配对与服务器设置」中重新扫码配对，然后回到这里重试。")
+            Text("Web 界面未识别到本机的配对身份。请重新扫码配对后自动回到这里。")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 24)
-            Button("关闭") { dismiss() }
-                .buttonStyle(.bordered)
+            Button("重新配对") { showSetup = true }
+                .buttonStyle(.borderedProminent)
+            Button("重试") {
+                pairingFailed = false
+                Task { await prepareURL(); coordinator.reload() }
+            }
+            .buttonStyle(.bordered)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    private func displayHost(_ url: URL) -> String {
-        url.host ?? url.absoluteString
-    }
-
-    private func openInSafari() {
-        guard let url else { return }
-        UIApplication.shared.open(url)
     }
 }
 
@@ -218,54 +208,75 @@ struct WebConsoleView: View {
 
 @MainActor
 final class Coordinator: NSObject, WKNavigationDelegate {
-    var canGoBack = false
-    var canGoForward = false
-    var pairingFailed = false
     /// 页面加载失败回调（网络错误/证书问题等 → 显示给用户）
     var onLoadError: ((String) -> Void)?
+    /// 配对失败页回调（加载的页面是配对失败页 → 引导重新配对）
+    var onPairingFailed: (() -> Void)?
+    /// 页面加载进度回调（0…1）
+    var onProgress: ((Double) -> Void)?
+    /// 页面加载完成回调
+    var onLoaded: (() -> Void)?
 
     private weak var webView: WKWebView?
+    private let pairingFailureMarkers = ["配对", "pair", "未授权", "授权", "设备"]
 
     func attach(_ webView: WKWebView) {
         self.webView = webView
         webView.navigationDelegate = self
     }
 
-    func goBack() async {
-        webView?.goBack()
-        refreshState()
-    }
-
-    func goForward() async {
-        webView?.goForward()
-        refreshState()
-    }
-
-    func reload() async {
+    /// 下拉刷新 / 手动重载
+    func reload() {
         webView?.reload()
-    }
-
-    private func refreshState() {
-        canGoBack = webView?.canGoBack ?? false
-        canGoForward = webView?.canGoForward ?? false
     }
 
     // MARK: WKNavigationDelegate
 
+    nonisolated func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        Task { @MainActor in
+            onProgress?(0.15)
+        }
+    }
+
     nonisolated func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         Task { @MainActor in
-            refreshState()
+            onProgress?(1)
+            onLoaded?()
+            // 页面就绪后再跑一次移动端适配（SPA 可能覆盖了最初的注入）
+            webView.evaluateJavaScript(WebViewCoordinator.mobileAdaptationJS, completionHandler: nil)
+            checkPairingFailure(webView)
         }
     }
 
     nonisolated func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         Task { @MainActor in
-            refreshState()
             let ns = error as NSError
-            // 用户主动取消的导航不算错误
             if ns.code != NSURLErrorCancelled {
                 onLoadError?("加载失败：\(ns.localizedDescription)（\(ns.domain) · \(ns.code)）")
             }
+        }
+    }
+
+    nonisolated func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        Task { @MainActor in
+            let ns = error as NSError
+            if ns.code != NSURLErrorCancelled {
+                onLoadError?("加载失败：\(ns.localizedDescription)（\(ns.domain) · \(ns.code)）")
+            }
+        }
+    }
+
+    // MARK: 内部
+
+    /// 启发式判断当前页面是否为配对失败页（URL path 是 pair 且标题含配对相关标记）
+    private func checkPairingFailure(_ webView: WKWebView) {
+        guard let url = webView.url else { return }
+        let title = webView.title?.lowercased() ?? ""
+        let path = url.path.lowercased()
+        let looksLikePairingPage = path.contains("pair")
+        let titleHintsPairing = pairingFailureMarkers.contains { title.contains($0) }
+        if looksLikePairingPage && titleHintsPairing {
+            onPairingFailed?()
         }
     }
 }
@@ -273,11 +284,10 @@ final class Coordinator: NSObject, WKNavigationDelegate {
 // MARK: - WebViewRepresentable（UIViewRepresentable 封装）
 
 struct WebViewRepresentable: UIViewRepresentable {
-    let url: URL?
-    let reloadToken: Int
+    let url: URL
     let coordinator: Coordinator
-
-    @State private var internalWebView: WKWebView?
+    var onProgress: (Double) -> Void
+    var onLoaded: () -> Void
 
     func makeCoordinator() -> Coordinator { coordinator }
 
@@ -285,24 +295,37 @@ struct WebViewRepresentable: UIViewRepresentable {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = WKWebsiteDataStore.default()
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
+        // 移动端适配：documentStart 注入，保证 SPA 首帧前就生效
+        let userScript = WKUserScript(
+            source: WebViewCoordinator.mobileAdaptationJS,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: false
+        )
+        configuration.userContentController.addUserScript(userScript)
+
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.allowsBackForwardNavigationGestures = true
+        webView.scrollView.bounces = true
+        webView.scrollView.alwaysBounceVertical = true
+        webView.scrollView.refreshControl = UIRefreshControl()
+        webView.scrollView.refreshControl?.addTarget(
+            context.coordinator,
+            action: #selector(WebViewCoordinator.didPullRefresh(_:)),
+            for: .valueChanged
+        )
         context.coordinator.attach(webView)
-        DispatchQueue.main.async {
-            internalWebView = webView
-        }
+        webView.load(URLRequest(url: url))
         return webView
     }
 
     func updateUIView(_ webView: WKWebView, context: Context) {
-        if let url, webView.url != url {
-            let request = URLRequest(url: url)
-            webView.load(request)
+        if webView.url == nil || webView.url?.host != url.host {
+            webView.load(URLRequest(url: url))
         }
     }
 }
 
-// MARK: - WKWebsiteDataStore 共享访问（Swift 并发适配）
+// MARK: - WebViewCoordinator（工具）
 
 extension WebViewCoordinator {
     /// 共享的 default cookie store（WKWebsiteDataStore.default() 主线程访问）
@@ -313,5 +336,54 @@ extension WebViewCoordinator {
     }
 }
 
-/// 占位类型：仅用于把 WKHTTPCookieStore 的并发访问集中到 MainActor
-enum WebViewCoordinator {}
+/// 工具类型：承载移动端适配 JS 与下拉刷新的 target action。
+enum WebViewCoordinator {
+    /// 移动端响应式适配脚本（幂等：window 标志位防重复执行）。
+    /// 处理 iPhone 直访 web UI 的三大问题：拥挤、点不到、元素消失。
+    static let mobileAdaptationJS = """
+    (function () {
+      'use strict';
+      if (window.__dshMobileAdapted) { return; }
+      window.__dshMobileAdapted = true;
+
+      function ensureViewport() {
+        var content = 'width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover';
+        var meta = document.querySelector('meta[name="viewport"]');
+        if (meta) {
+          meta.setAttribute('content', content);
+        } else {
+          meta = document.createElement('meta');
+          meta.name = 'viewport';
+          meta.content = content;
+          document.head.appendChild(meta);
+        }
+      }
+
+      function injectStyle() {
+        if (document.getElementById('dsh-mobile-adapt')) { return; }
+        var style = document.createElement('style');
+        style.id = 'dsh-mobile-adapt';
+        style.textContent = [
+          'html, body { max-width: 100%; overflow-x: hidden; }',
+          'body { -webkit-text-size-adjust: 100%; }',
+          'input, textarea, select { font-size: 16px !important; }',
+          'button, a, [role="button"], [type="button"], [type="submit"], input[type="submit"] { touch-action: manipulation; }',
+          '@media (max-width: 480px) {',
+          '  button, a[href], [role="button"], [type="button"], [type="submit"] { min-height: 40px; }',
+          '}'
+        ].join('\\n');
+        document.head.appendChild(style);
+      }
+
+      ensureViewport();
+      injectStyle();
+    })();
+    """
+
+    @objc static func didPullRefresh(_ sender: UIRefreshControl) {
+        Task { @MainActor in
+            // 只负责结束下拉动画；刷新动作由 WebViewRepresentable 的 coordinator 处理
+            sender.endRefreshing()
+        }
+    }
+}
