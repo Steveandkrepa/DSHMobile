@@ -161,7 +161,17 @@ xcodebuild "${BUILD_ARGS[@]}" build
 # ============================================================ 4. 定位产物
 step "[4/6] 从 -showBuildSettings 读取真实的产物路径"
 
-BUILD_SETTINGS="$(xcodebuild "${BUILD_ARGS[@]}" -showBuildSettings 2>/dev/null)"
+# 注意：这里用 `-target DSHMobile` 而不是 `-scheme DSHMobile` 来查设置。
+# scheme 包含多个 target 时（主 App + Widget 扩展），`-scheme ... -showBuildSettings`
+# 会依次打印每个 target 的设置，`tail -n 1` 会取到**最后一个** target（即
+# DSHMobileWidgets）的 FULL_PRODUCT_NAME（DSHMobileWidgets.appex），导致把扩展
+# 误当主 App 打包。`-target` 只返回指定 target 的设置，FULL_PRODUCT_NAME 恒为主 App。
+BUILD_SETTINGS="$(xcodebuild \
+    -project "$PROJECT_FILE" \
+    -target DSHMobile \
+    -configuration "$CONFIGURATION" \
+    -derivedDataPath "$DERIVED_DATA" \
+    -showBuildSettings 2>/dev/null)"
 
 read_setting() {
     printf '%s\n' "$BUILD_SETTINGS" \
