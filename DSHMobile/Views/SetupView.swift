@@ -12,6 +12,7 @@
 //    3. 粘贴 token → 客户端 POST {base}/api/pair/accept → 拿 deviceId 并保存。
 // ============================================================================
 import SwiftUI
+import UIKit
 
 struct SetupView: View {
     enum Mode { case initial, settings }
@@ -25,6 +26,7 @@ struct SetupView: View {
     @State private var isBusy = false
     @State private var errorMessage: String?
     @State private var showingHelp = false
+    @State private var showingScanner = false
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -56,6 +58,12 @@ struct SetupView: View {
                         TextField("粘贴配对 token", text: $token)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
+                        Button {
+                            showingScanner = true
+                        } label: {
+                            Label("扫描配对链接二维码", systemImage: "qrcode.viewfinder")
+                                .font(.footnote)
+                        }
                         Button {
                             showingHelp = true
                         } label: {
@@ -106,6 +114,13 @@ struct SetupView: View {
                         }
                         .disabled(isBusy || !canPair)
 
+                        Button {
+                            showingScanner = true
+                        } label: {
+                            Label("扫描配对链接二维码", systemImage: "qrcode.viewfinder")
+                        }
+                        .disabled(isBusy)
+
                         Button(role: .destructive) {
                             settings.markUnpaired()
                         } label: {
@@ -127,12 +142,23 @@ struct SetupView: View {
                 get: { errorMessage != nil },
                 set: { if !$0 { errorMessage = nil } }
             )) {
+                Button("复制详情") {
+                    UIPasteboard.general.string = errorMessage ?? ""
+                }
                 Button("好", role: .cancel) {}
             } message: {
                 Text(errorMessage ?? "")
             }
             .sheet(isPresented: $showingHelp) {
                 HelpSheet()
+            }
+            .fullScreenCover(isPresented: $showingScanner) {
+                QRScannerContainer(token: $token, publicURL: $publicURL, autoPair: {
+                    // 地址已填好才自动发起配对；否则只填 token，等用户补地址后手动点配对
+                    if !lanURL.isEmpty || !publicURL.isEmpty {
+                        Task { await pair() }
+                    }
+                })
             }
             .onAppear(perform: loadCurrent)
         }
@@ -141,6 +167,34 @@ struct SetupView: View {
     private var canPair: Bool {
         !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && (!lanURL.isEmpty || !publicURL.isEmpty)
+    }
+
+    /// 从二维码载荷中提取配对信息：
+    ///   https://<id>.dsh-market.com/pair-accept?pair=<token>
+    ///     → token = pair 参数，publicURL = https://<id>.dsh-market.com（隧道域名即公网地址）
+    ///   裸 token / 其他格式 → 原样 trim 后返回
+    static func parse(_ payload: String) -> (token: String, publicURL: String?) {
+        let trimmed = payload.trimmingCharacters(in: .whitespacesAndNewlines)
+        var token: String?
+        var publicURL: String?
+        if let comps = URLComponents(string: trimmed) {
+            if let pair = comps.queryItems?.first(where: { $0.name == "pair" })?.value, !pair.isEmpty {
+                token = pair
+            }
+            if let scheme = comps.scheme, let host = comps.host, !host.isEmpty {
+                publicURL = "\(scheme)://\(host)"
+            }
+        }
+        // 兜底：字符串里内联了 pair=xxx
+        if token == nil, trimmed.contains("pair=") {
+            let parts = trimmed.components(separatedBy: "pair=")
+            if parts.count > 1 {
+                let rest = parts[1]
+                let t = rest.split(whereSeparator: { $0 == "&" || $0.isWhitespace }).first.map(String.init) ?? rest
+                if !t.isEmpty { token = t }
+            }
+        }
+        return (token ?? trimmed, publicURL)
     }
 
     @MainActor
@@ -191,6 +245,49 @@ struct SetupView: View {
     }
 }
 
+// MARK: - 扫码配对容器
+
+/// 全屏扫码：VisionKit 相机 + 右上角关闭按钮；扫到后自动提取 token 并填入公网地址，随后触发配对
+private struct QRScannerContainer: View {
+    @Binding var token: String
+    @Binding var publicURL: String
+    /// 令牌填好后自动发起配对
+    var autoPair: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            QRScannerView(onScan: handleScan) {
+                dismiss()
+            }
+            Button {
+                dismiss()
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 32))
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(.white)
+                    .background(.black.opacity(0.4), in: Circle())
+            }
+            .padding(.top, 16)
+            .padding(.trailing, 16)
+        }
+        .ignoresSafeArea()
+    }
+
+    private func handleScan(_ payload: String) {
+        let parsed = SetupView.parse(payload)
+        token = parsed.token
+        if let pub = parsed.publicURL, !pub.isEmpty, publicURL.isEmpty {
+            publicURL = pub
+        }
+        dismiss()
+        // 地址已填好（手动填或扫码自动推导）的话直接发起配对
+        autoPair()
+    }
+}
+
 // MARK: - 配对帮助
 
 private struct HelpSheet: View {
@@ -215,12 +312,20 @@ private struct HelpSheet: View {
                     复制 token 即可。
                     """)
                 }
+                Section("方法三：扫码配对（推荐）") {
+                    Text("""
+                    1. 电脑端执行 `node dsh-pair.cjs issue`，或 DSH Web「设置 → 远程设备」生成配对链接。
+                    2. 让配对链接的二维码显示在电脑屏幕上（终端/浏览器会渲染二维码）。
+                    3. App 里点「扫描配对链接二维码」，对准屏幕即可自动完成配对。
+                    """)
+                }
                 Section("注意事项") {
                     Text("""
                     · 局域网地址用于同一 WiFi 直连（延迟低、不经公网）。
                     · 公网地址走 Cloudflare 隧道/中继，任何网络都能连。
                     · 客户端自动检测：先试局域网，超时自动切公网。
                     · 令牌一次性有效，配对成功后保存的设备 ID 长期有效。
+                    · 扫码需要相机权限，第一次会弹授权。
                     """)
                 }
             }

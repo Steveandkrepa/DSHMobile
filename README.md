@@ -5,7 +5,7 @@
 
 ## 功能
 
-- 🔗 **配对连接**：用配对令牌换 deviceId，长期有效（配合服务器端永久令牌配置）
+- 🔗 **配对连接**：用配对令牌换 deviceId，长期有效（配合服务器端永久令牌配置）；**支持扫码配对**——直接扫描配对链接的二维码即可完成，无需手输令牌
 - 📶 **智能路由**：自动检测——同一 WiFi 下走局域网直连（低延迟），否则走公网中转（Cloudflare 隧道）
 - 💬 **实时聊天**：基于 DSH 的 WebSocket mux 流式协议，流式增量渲染（支持思考过程折叠 / 工具调用展示）
 - 📋 **会话管理**：浏览历史会话、新建会话、取消生成
@@ -24,7 +24,8 @@
 3. **安装 App**：AirDrop / 文件 App 打开 `.ipa` → 选择 SideStore → 签名安装
 4. **配对**：
    - 在 DSH 主机上执行 `node dsh-pair.cjs issue` 获取配对链接（或 DSH Web「设置 → 远程设备」添加设备）
-   - App 里填写局域网地址（如 `http://192.168.0.142:3080`）与公网地址（如 `https://xxxx.dsh-market.com`），粘贴令牌配对
+   - App 里填写局域网地址（如 `http://192.168.0.142:3080`）与公网地址（如 `https://xxxx.dsh-market.com`）
+   - 点击「扫描配对链接二维码」，扫电脑屏幕/手机上的配对链接二维码即可自动填入令牌并配对（也可手动粘贴令牌）
 5. 开始对话 🎉
 
 > 免费 Apple ID 的证书 7 天过期，需要在 SideStore 里重新签名；同时最多装 3 个自签 App。
@@ -70,7 +71,8 @@ DSHMobile/
 │   │   ├── ChatViewModel.swift    # follow 流折叠 + 流式渲染
 │   │   └── SettingsViewModel.swift # 设置加载/保存（修订冲突保护）+ 凭证
 │   └── Views/
-│       ├── SetupView.swift        # 配对 / 服务器设置
+│       ├── SetupView.swift        # 配对 / 服务器设置（含扫码配对）
+│       ├── QRScannerView.swift    # VisionKit 二维码扫描（配对用）
 │       ├── SessionListView.swift  # 会话列表
 │       ├── ChatView.swift         # 聊天界面
 │       ├── SettingsView.swift     # 设置页（配对入口 + 全量设置 + 凭证）

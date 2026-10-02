@@ -26,7 +26,10 @@ enum APIError: Error, LocalizedError {
     var errorDescription: String? {
         switch self {
         case .badURL: return "服务器地址无效"
-        case .transport(let e): return "网络错误：\(e.localizedDescription)"
+        case .transport(let e):
+            // 附上底层 NSError 的 domain/code，方便排查系统级错误（如 iOS 本地网络/ATS 拒绝）
+            let ns = e as NSError
+            return "网络错误：\(e.localizedDescription)（\(ns.domain) · \(ns.code)）"
         case .httpStatus(let code): return "HTTP \(code)"
         case .badEnvelope: return "响应格式无法解析"
         case .rpc(let code, let message): return "\(code)：\(message)"

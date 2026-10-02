@@ -54,5 +54,9 @@
 	<!-- 局域网权限说明（iOS 14+ 会弹本地网络授权） -->
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>需要访问本地网络，以便直连你局域网里的 DSH 服务器。</string>
+
+	<!-- 相机权限：扫码配对（扫远程配对链接二维码提取令牌） -->
+	<key>NSCameraUsageDescription</key>
+	<string>需要访问相机，扫描 DSH 配对链接的二维码即可完成配对，无需手输令牌。</string>
 </dict>
 </plist>

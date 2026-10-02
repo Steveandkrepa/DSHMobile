@@ -5,6 +5,7 @@
 //  标题来源：session.list 的 projections.title，回退到创建时间。
 // ============================================================================
 import SwiftUI
+import UIKit
 
 struct SessionListView: View {
     @EnvironmentObject var settings: AppSettings
@@ -40,6 +41,9 @@ struct SessionListView: View {
                 get: { errorMessage != nil },
                 set: { if !$0 { errorMessage = nil } }
             )) {
+                Button("复制详情") {
+                    UIPasteboard.general.string = errorMessage ?? ""
+                }
                 Button("好", role: .cancel) {}
             } message: {
                 Text(errorMessage ?? "")
@@ -117,7 +121,8 @@ struct SessionListView: View {
             // 新建后直接进入聊天
             let summary = SessionSummary(
                 sessionId: result.sessionId,
-                updatedAt: Date().timeIntervalSince1970,
+                // 服务器 updatedAt 是毫秒，本地同样用毫秒保持一致
+                updatedAt: Date().timeIntervalSince1970 * 1000,
                 agentAvailable: true,
                 running: false,
                 blank: true,
@@ -179,7 +184,8 @@ private struct SessionRow: View {
     }
 
     private var subtitle: String {
-        let date = Date(timeIntervalSince1970: session.updatedAt)
+        // 服务器 updatedAt 是毫秒时间戳，转成秒再建 Date
+        let date = Date(timeIntervalSince1970: session.updatedAt / 1000)
         let fmt = DateFormatter()
         fmt.dateFormat = "yyyy-MM-dd HH:mm"
         var s = fmt.string(from: date)
