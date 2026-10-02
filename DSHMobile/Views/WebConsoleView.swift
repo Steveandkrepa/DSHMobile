@@ -443,8 +443,18 @@ enum WebViewCoordinator {
     static let mobileAdaptationJS = """
     (function () {
       'use strict';
-      if (window.__dshMobileAdapted) { return; }
-      window.__dshMobileAdapted = true;
+
+      // ---- DOM 就绪后执行 ----
+      // WKUserScript 在 atDocumentStart 注入时 head/body 尚未解析（document.head 为
+      // null），直接在此时操作 DOM 会抛 TypeError 导致后续注入全部中断；因此先等
+      // DOMContentLoaded（已就绪则立即执行），didFinish 重跑时被幂等标志挡住。
+      function whenReady(fn) {
+        if (document.readyState === 'loading') {
+          document.addEventListener('DOMContentLoaded', fn);
+        } else {
+          fn();
+        }
+      }
 
       function ensureViewport() {
         var content = 'width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover';
@@ -455,7 +465,7 @@ enum WebViewCoordinator {
           meta = document.createElement('meta');
           meta.name = 'viewport';
           meta.content = content;
-          document.head.appendChild(meta);
+          (document.head || document.documentElement).appendChild(meta);
         }
       }
 
@@ -468,6 +478,17 @@ enum WebViewCoordinator {
           'body { -webkit-text-size-adjust: 100%; }',
           'input, textarea, select { font-size: 16px !important; }',
           'button, a, [role="button"], [type="button"], [type="submit"], input[type="submit"] { touch-action: manipulation; }',
+          // 顶部安全区：灵动岛/刘海/状态栏避让。会话页顶部栏（header 等）在正常
+          // 文档流，给它们加顶部安全区 padding，内容不再延伸进灵动岛/时间电量区域。
+          // 但模态（role=dialog / data-shortcut-modal）内部的 header 是模态自己的
+          // 头部，居中显示不受状态栏影响，必须排除，否则模态头部会被顶下去。
+          '[class*="header"], [class*="topbar"], [class*="titlebar"], [class*="navBar"], [class*="navbar"], [class*="appBar"] {',
+          '  padding-top: env(safe-area-inset-top, 0px) !important;',
+          '}',
+          '[role="dialog"] [class*="header"], [data-shortcut-modal] [class*="header"],',
+          '[role="dialog"] [class*="topbar"], [data-shortcut-modal] [class*="topbar"] {',
+          '  padding-top: 0 !important;',
+          '}',
           '@media (max-width: 600px) {',
           // 核心：桌面版把内容宽度 clamp 在 680px+，在 iPhone 上必然横向溢出
           // → 覆盖为视口宽度，聊天内容与输入框不再被挤出去
@@ -479,18 +500,16 @@ enum WebViewCoordinator {
           '    --dsh-composer-text-max-height: 40vh !important;',
           '  }',
           // 输入区（CSS-in-JS 运行时类名带 composerSeat/composerHero 前缀，用属性匹配）
-          '  [class*="composerSeat"] { padding-bottom: max(env(safe-area-inset-bottom), 6px) !important; }',
+          // 底部安全区：Home 指示条避让，发送/附件等按钮不再被遮挡
+          '  [class*="composerSeat"] { padding-bottom: max(env(safe-area-inset-bottom), 12px) !important; }',
           '  [class*="composerHero"] { width: 100% !important; padding-bottom: 10px !important; }',
           '  [class*="composerStack"] { gap: 4px !important; }',
           '  [class*="editor"] { font-size: 16px !important; }',
           '  button, a[href], [role="button"], [type="button"], [type="submit"] { min-height: 40px; }',
           '}'
         ].join('\\n');
-        document.head.appendChild(style);
+        (document.head || document.documentElement).appendChild(style);
       }
-
-      ensureViewport();
-      injectStyle();
 
       // ---- 会话检测：把"当前打开的会话"回传给原生层 ----
       // 官方会话 UI 在打开的会话 body 上挂 data-conversation-session 属性；
@@ -525,7 +544,6 @@ enum WebViewCoordinator {
         // 兜底轮询（SPA 极端重渲染下 MutationObserver 可能漏报）
         setInterval(report, 2000);
       }
-      startSessionWatch();
 
       // ---- Web 设置页注入"App 设置"按钮 ----
       // 原生悬浮齿轮按钮已移除；改在 Web 设置页（data-shortcut-modal="settings"
@@ -581,9 +599,18 @@ enum WebViewCoordinator {
             document.documentElement, { childList: true, subtree: true }
           );
         } catch (e) {}
-        setInterval(ensureButton, 1500);
+        setInterval(ensureButton, 1000);
       }
-      injectAppSettingsButton();
+
+      // ---- 启动（DOM 就绪后执行全部注入）----
+      whenReady(function () {
+        if (window.__dshMobileAdapted) { return; }
+        window.__dshMobileAdapted = true;
+        try { ensureViewport(); } catch (e) {}
+        try { injectStyle(); } catch (e) {}
+        startSessionWatch();
+        injectAppSettingsButton();
+      });
     })();
     """
 }
