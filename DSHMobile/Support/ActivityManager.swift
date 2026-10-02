@@ -57,13 +57,14 @@ final class ActivityManager {
     }
 
     /// 更新实时活动状态（流式期间频繁调用）。
-    func update(progress: Double, status: String, detail: String, chars: Int = 0) {
+    func update(progress: Double, status: String, detail: String, chars: Int = 0, step: String = "") {
         guard let current else { return }
         let state = TaskProgressAttributes.ContentState(
             progress: progress,
             status: status,
             detail: detail,
-            chars: chars
+            chars: chars,
+            step: step
         )
         let content = ActivityContent(state: state, staleDate: nil)
         Task {

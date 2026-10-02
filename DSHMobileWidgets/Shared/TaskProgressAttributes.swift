@@ -31,11 +31,16 @@ public struct TaskProgressAttributes: ActivityAttributes {
         /// 已流式收到的字符数（用于细粒度展示）
         public var chars: Int
 
-        public init(progress: Double, status: String, detail: String, chars: Int = 0) {
+        /// 当前步骤标签（如"运行命令""思考中…""调用工具：xxx"），
+        /// 供灵动岛长按展开 / 锁屏时展示当前执行到哪一步。
+        public var step: String
+
+        public init(progress: Double, status: String, detail: String, chars: Int = 0, step: String = "") {
             self.progress = progress
             self.status = status
             self.detail = detail
             self.chars = chars
+            self.step = step
         }
     }
 

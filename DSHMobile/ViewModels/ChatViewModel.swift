@@ -57,6 +57,8 @@ final class ChatViewModel: ObservableObject {
     private var userCancelled = false
     /// 本轮开始时刻的 seq 边界（用于 turn/end 判定本轮产生的消息）
     private var turnStartSeq = 0
+    /// 当前正在执行的步骤（工具调用 / 思考 / 等待授权），供灵动岛长按展示
+    private var currentStep: String = ""
 
     init(sessionId: String, settings: AppSettings? = nil) {
         self.sessionId = sessionId
@@ -236,6 +238,37 @@ final class ChatViewModel: ObservableObject {
                 let reasonKind = event.data?.objectValue?["reason"]?.objectValue?["kind"]?.stringValue
                 settleTurnEnd(reasonKind: reasonKind)
             }
+
+        case "tool/call":
+            // 工具开始执行：在灵动岛 / 锁屏展示当前步骤
+            if let name = event.data?.objectValue?["name"]?.stringValue {
+                currentStep = Self.stepLabel(for: name)
+                let args = event.data?.objectValue?["arguments"]?.stringValue ?? ""
+                let argDetail = Self.stepDetail(for: name, arguments: args)
+                updateLiveActivityStep(detail: argDetail)
+            }
+
+        case "tool/result":
+            // 工具执行完成 → 回到"处理中"；下一步事件会覆盖
+            if !currentStep.isEmpty {
+                currentStep = ""
+                updateLiveActivityStep(detail: nil)
+            }
+
+        case "assistant/attempt":
+            // 模型开始生成（思考 / 起草）
+            currentStep = "思考中…"
+            updateLiveActivityStep(detail: nil)
+
+        case "step/start":
+            // 新一轮 step 开始：若上一轮遗留"思考中"等标签，重置为通用状态
+            if currentStep == "思考中…" {
+                currentStep = ""
+            }
+
+        case "approval/asked":
+            currentStep = "等待授权"
+            updateLiveActivityStep(detail: nil)
 
         default:
             break
@@ -490,8 +523,81 @@ final class ChatViewModel: ObservableObject {
             progress: estimated,
             status: "运行中",
             detail: detail,
-            chars: streamedChars
+            chars: streamedChars,
+            step: currentStep
         )
+    }
+
+    /// 步骤变化（工具执行 / 思考 / 等待授权）时刷新实时活动。
+    /// - Parameter detail: 可选步骤详情（如正在运行的命令）；传 nil 时回落为流式预览。
+    private func updateLiveActivityStep(detail: String?) {
+        guard settings.liveActivitiesEnabled, liveActivity != nil else { return }
+        streamedChars = messages.reduce(0) { acc, m in
+            acc + m.blocks.reduce(0) { $0 + ($1.text.count) }
+        }
+        let estimated = min(0.92, 0.15 + Double(streamedChars) / 20_000.0 * 0.77)
+        let text = detail ?? liveActivityPreview() ?? "正在生成回复…"
+        ActivityManager.shared.update(
+            progress: estimated,
+            status: "运行中",
+            detail: text,
+            chars: streamedChars,
+            step: currentStep
+        )
+    }
+
+    /// 工具名 → 友好步骤标签（灵动岛长按展开 / 锁屏展示）
+    private static func stepLabel(for name: String) -> String {
+        switch name {
+        case "bash", "shell", "exec", "command": return "运行命令"
+        case "web_search", "search", "web_search_direct": return "搜索网页"
+        case "read", "read_file": return "读取文件"
+        case "write", "edit", "edit_file", "apply_patch": return "编辑文件"
+        case "ask_user_question": return "向你提问"
+        case "subagent", "subagent_fork": return "启动子代理"
+        case "todo_write": return "更新任务清单"
+        default: return "调用工具：\(name)"
+        }
+    }
+
+    /// 提取步骤详情（如 bash 的具体命令 / 搜索词 / 文件路径）。
+    /// 优先解析 arguments JSON 中的关键字段，失败则回落为原始参数串。
+    private static func stepDetail(for name: String, arguments: String) -> String? {
+        let fallback = {
+            let trimmed = arguments.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : String(trimmed.prefix(40))
+        }
+        guard let data = arguments.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return fallback()
+        }
+        switch name {
+        case "bash", "shell", "exec", "command":
+            if let cmd = obj["command"] as? String, !cmd.isEmpty {
+                return String(cmd.prefix(40))
+            }
+        case "web_search", "search", "web_search_direct":
+            if let q = obj["query"] as? String, !q.isEmpty {
+                return String(q.prefix(40))
+            }
+            if let arr = obj["queries"] as? [String], let first = arr.first, !first.isEmpty {
+                return String(first.prefix(40))
+            }
+        case "read", "read_file", "write", "edit", "edit_file":
+            if let p = obj["path"] as? String, !p.isEmpty {
+                return String(p.prefix(40))
+            }
+            if let p = obj["file_path"] as? String, !p.isEmpty {
+                return String(p.prefix(40))
+            }
+        case "ask_user_question":
+            if let q = obj["question"] as? String, !q.isEmpty {
+                return String(q.prefix(40))
+            }
+        default:
+            break
+        }
+        return fallback()
     }
 
     /// 结束实时活动（完成 / 取消 / 失败）

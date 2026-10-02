@@ -182,6 +182,12 @@ final class AppSettings: ObservableObject {
     /// 关注级别变更的版本号（@Published 驱动列表刷新；值本身无意义）
     @Published private(set) var watchLevelsRevision = 0
 
+    /// 当前 Web 壳里打开的会话（由 JS 检测回传）；用于"打开的会话默认特别关注"
+    @Published private(set) var activeWebSessionId: String?
+
+    /// 我们自动设为"特别关注"的会话（区别于用户手动设置）
+    private var autoFocusedSessionId: String?
+
     /// 指定会话的通知关注级别；未设置过 → 跟随全局
     func watchLevel(for sessionId: String) -> WatchLevel {
         let key = "session.watch.\(sessionId)"
@@ -189,11 +195,35 @@ final class AppSettings: ObservableObject {
         return WatchLevel(rawValue: raw) ?? .global
     }
 
-    /// 设置会话的通知关注级别
+    /// 手动设置会话的通知关注级别（控制面板操作）。
+    /// 用户手动干预后，若该会话此前是"打开自动关注"，则解除自动跟踪。
     func setWatchLevel(_ level: WatchLevel, for sessionId: String) {
+        if sessionId == autoFocusedSessionId {
+            autoFocusedSessionId = nil
+        }
         let key = "session.watch.\(sessionId)"
         defaults.set(level.rawValue, forKey: key)
         watchLevelsRevision &+= 1
+    }
+
+    /// Web 壳会话切换回调（JS 检测到打开的会话变化时调用）。
+    /// 规则：
+    ///  · 新会话进入：若它还是默认的"跟随全局"（用户未手动设置过）→ 自动改为"特别关注"；
+    ///  · 旧会话离开：若旧会话是我们自动关注、且用户未手动改过 → 还原为"跟随全局"。
+    func sessionBecameActive(_ sessionId: String?) {
+        let prev = activeWebSessionId
+        activeWebSessionId = sessionId
+        // 还原上一个自动关注的会话（仅当用户未手动接管）
+        if let prev, let auto = autoFocusedSessionId, auto == prev, prev != sessionId,
+           watchLevel(for: prev) == .focused {
+            setWatchLevel(.global, for: prev)
+        }
+        guard let sessionId, !sessionId.isEmpty else { return }
+        // 新会话：未手动设置（=跟随全局）→ 自动特别关注
+        if watchLevel(for: sessionId) == .global {
+            setWatchLevel(.focused, for: sessionId)
+            autoFocusedSessionId = sessionId
+        }
     }
 }
 

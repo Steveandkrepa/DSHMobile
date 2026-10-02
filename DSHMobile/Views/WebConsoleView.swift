@@ -102,6 +102,10 @@ struct WebConsoleView: View {
                     pairingFailed = true
                 }
             }
+            coordinator.onSessionChanged = { sessionId in
+                // Web 壳里打开的会话变化 → 自动"特别关注"当前打开的会话
+                settings.sessionBecameActive(sessionId)
+            }
             await prepareURL()
         }
         // 重新配对后 deviceId 变化 → 重新注入 cookie 并强制刷新
@@ -207,7 +211,7 @@ struct WebConsoleView: View {
 // MARK: - Coordinator（桥接 WKWebView 代理事件）
 
 @MainActor
-final class Coordinator: NSObject, WKNavigationDelegate {
+final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
     /// 页面加载失败回调（网络错误/证书问题等 → 显示给用户）
     var onLoadError: ((String) -> Void)?
     /// 配对失败页回调（加载的页面是配对失败页 → 引导重新配对）
@@ -216,6 +220,8 @@ final class Coordinator: NSObject, WKNavigationDelegate {
     var onProgress: ((Double) -> Void)?
     /// 页面加载完成回调
     var onLoaded: (() -> Void)?
+    /// Web 壳里打开的会话变化回调（JS 回传 sessionId；无会话时为 nil）
+    var onSessionChanged: ((String?) -> Void)?
 
     private weak var webView: WKWebView?
     private let pairingFailureMarkers = ["配对", "pair", "未授权", "授权", "设备"]
@@ -223,6 +229,18 @@ final class Coordinator: NSObject, WKNavigationDelegate {
     func attach(_ webView: WKWebView) {
         self.webView = webView
         webView.navigationDelegate = self
+    }
+
+    // MARK: WKScriptMessageHandler
+
+    /// 接收 JS 回传的当前会话 ID（message.name == "dshSession"）
+    nonisolated func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard message.name == "dshSession" else { return }
+        let body = message.body as? String
+        let sessionId = (body?.isEmpty ?? true) ? nil : body
+        Task { @MainActor [weak self] in
+            self?.onSessionChanged?(sessionId)
+        }
     }
 
     /// 下拉刷新 / 手动重载
@@ -308,6 +326,8 @@ struct WebViewRepresentable: UIViewRepresentable {
             forMainFrameOnly: false
         )
         configuration.userContentController.addUserScript(userScript)
+        // 会话检测回传通道：JS 把当前打开的会话 ID 发给原生层
+        configuration.userContentController.add(context.coordinator, name: "dshSession")
 
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.allowsBackForwardNavigationGestures = true
@@ -374,7 +394,21 @@ enum WebViewCoordinator {
           'body { -webkit-text-size-adjust: 100%; }',
           'input, textarea, select { font-size: 16px !important; }',
           'button, a, [role="button"], [type="button"], [type="submit"], input[type="submit"] { touch-action: manipulation; }',
-          '@media (max-width: 480px) {',
+          '@media (max-width: 600px) {',
+          // 核心：桌面版把内容宽度 clamp 在 680px+，在 iPhone 上必然横向溢出
+          // → 覆盖为视口宽度，聊天内容与输入框不再被挤出去
+          '  :root, html, body {',
+          '    --dsh-chat-content-width: min(calc(100vw - 16px), 920px) !important;',
+          '    --dsh-composer-card-max-width: calc(100vw - 16px) !important;',
+          '    --dsh-composer-side-clearance: 8px !important;',
+          '    --dsh-composer-dock-inset: 8px !important;',
+          '    --dsh-composer-text-max-height: 40vh !important;',
+          '  }',
+          // 输入区（CSS-in-JS 运行时类名带 composerSeat/composerHero 前缀，用属性匹配）
+          '  [class*="composerSeat"] { padding-bottom: max(env(safe-area-inset-bottom), 6px) !important; }',
+          '  [class*="composerHero"] { width: 100% !important; padding-bottom: 10px !important; }',
+          '  [class*="composerStack"] { gap: 4px !important; }',
+          '  [class*="editor"] { font-size: 16px !important; }',
           '  button, a[href], [role="button"], [type="button"], [type="submit"] { min-height: 40px; }',
           '}'
         ].join('\\n');
@@ -383,6 +417,41 @@ enum WebViewCoordinator {
 
       ensureViewport();
       injectStyle();
+
+      // ---- 会话检测：把"当前打开的会话"回传给原生层 ----
+      // 官方会话 UI 在打开的会话 body 上挂 data-conversation-session 属性；
+      // 无该元素（列表页/设置页）表示当前没有打开的会话。
+      function startSessionWatch() {
+        if (window.__dshSessionWatchStarted) { return; }
+        window.__dshSessionWatchStarted = true;
+        var last = null;
+        function currentSessionId() {
+          var el = document.querySelector('[data-conversation-session]');
+          return el ? el.getAttribute('data-conversation-session') : null;
+        }
+        function report() {
+          var id = currentSessionId();
+          if (id !== last) {
+            last = id;
+            try {
+              window.webkit.messageHandlers.dshSession.postMessage(id || '');
+            } catch (e) { /* 原生侧未注册时忽略 */ }
+          }
+        }
+        report();
+        try {
+          var mo = new MutationObserver(function () { report(); });
+          mo.observe(document.documentElement, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['data-conversation-session']
+          });
+        } catch (e) {}
+        // 兜底轮询（SPA 极端重渲染下 MutationObserver 可能漏报）
+        setInterval(report, 2000);
+      }
+      startSessionWatch();
     })();
     """
 }

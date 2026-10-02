@@ -52,7 +52,11 @@ final class SessionWatcher {
         do {
             let sessions = try await api.listSessions()
             let running = sessions.filter { $0.running }
-            let target = running.max { $0.updatedAt < $1.updatedAt }
+            // 优先跟随当前打开的会话（Web 壳 JS 检测回传）；否则跟随最近更新的运行中会话
+            var target = running.first { $0.sessionId == settings.activeWebSessionId }
+            if target == nil {
+                target = running.max { $0.updatedAt < $1.updatedAt }
+            }
             if let target {
                 if target.sessionId != followedSessionId {
                     stopEngine()

@@ -141,9 +141,9 @@ struct WebShellControlSheet: View {
         }
     }
 
-    /// 会话标题：projections.title 优先，空会话显示「新会话」
+    /// 会话标题：projections.values.title 优先，空会话显示「新会话」
     private func title(of session: SessionSummary) -> String {
-        if let title = session.projections?.objectValue?["title"]?.stringValue,
+        if let title = session.projections?.objectValue?["values"]?.objectValue?["title"]?.stringValue,
            !title.isEmpty {
             return title
         }

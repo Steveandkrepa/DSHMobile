@@ -65,6 +65,12 @@ struct TaskProgressLiveActivity: Widget {
 
     private func expandedBottom(context: ActivityViewContext<TaskProgressAttributes>) -> some View {
         VStack(alignment: .leading, spacing: 6) {
+            if !context.state.step.isEmpty {
+                Label(context.state.step, systemImage: "chevron.right.circle")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.purple)
+                    .lineLimit(1)
+            }
             ProgressView(value: context.state.progress)
                 .progressViewStyle(.linear)
                 .tint(.purple)
@@ -116,6 +122,13 @@ struct LockScreenView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
+
+            if !context.state.step.isEmpty {
+                Label(context.state.step, systemImage: "chevron.right.circle")
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.purple)
+                    .lineLimit(1)
+            }
 
             ProgressView(value: context.state.progress)
                 .progressViewStyle(.linear)
