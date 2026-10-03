@@ -17,8 +17,8 @@
 //    WKWebView 的 cookie store，免重新扫码直接进入官方 GUI（/pair-app）。
 //    若 deviceId 失效，web 显示配对失败页 → 引导重新配对。
 //
-//  控制入口：Web 设置页内注入的"App 设置"按钮 → WebShellControlSheet
-//    （通知/灵动岛/会话关注/服务器与配对），原生能力集中管理；
+//  原生能力入口：全部在原生外壳（WebChatShellView）里——顶栏齿轮菜单 → App 设置
+//    （通知/灵动岛/会话特别关注/服务器与配对），网页内不再注入任何原生入口；
 //    新窗口链接（window.open / target=_blank）在壳内直接打开。
 // ============================================================================
 import SwiftUI
@@ -38,17 +38,22 @@ struct WebConsoleView: View {
     /// · 嵌入外壳（WebChatShellView）时传入自己持有的 Coordinator，外壳即可调用
     ///   coordinator.openSession(_:) / newSession() 在网页里切换会话。
     /// · 不传则内部自建（与 1.0 之前行为一致）。
-    init(fillSafeArea: Bool = true, coordinator: Coordinator? = nil) {
+    /// · reloadRequest 变化一次 = 请求一次彻底刷新（重新探测基址 + 重注入 cookie
+    ///   后回到 /pair-app）——外壳的"重新加载网页"与抽屉里的刷新都走这条路。
+    init(fillSafeArea: Bool = true, coordinator: Coordinator? = nil, reloadRequest: Int = 0) {
         self.fillSafeArea = fillSafeArea
         self.coordinator = coordinator ?? Coordinator()
+        self.reloadRequest = reloadRequest
     }
+
+    /// 外壳请求刷新的计数（每 +1 触发一次刷新）
+    var reloadRequest: Int = 0
 
     @State private var url: URL?
     @State private var loadError: String?
     @State private var pairingFailed = false
     @State private var isLoaded = false
     @State private var progress: Double = 0
-    @State private var showControlSheet = false
     @State private var showSetup = false
 
     private let coordinator: Coordinator
@@ -83,10 +88,6 @@ struct WebConsoleView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .sheet(isPresented: $showControlSheet) {
-            WebShellControlSheet(onReload: { coordinator.reload() })
-                .environmentObject(settings)
-        }
         .fullScreenCover(isPresented: $showSetup) {
             SetupView(mode: .settings)
                 .environmentObject(settings)
@@ -106,19 +107,23 @@ struct WebConsoleView: View {
                 // Web 壳里打开的会话变化 → 自动"特别关注"当前打开的会话
                 settings.sessionBecameActive(sessionId)
             }
-            coordinator.onOpenControl = {
-                // Web 设置页里的"App 设置"按钮 → 唤起原生控制面板
-                Task { @MainActor in
-                    showControlSheet = true
-                }
-            }
             coordinator.onPhaseChanged = { phase in
                 // 会话页阶段 → 写入 settings，外层 WebChatShellView 据此显隐原生输入条
                 Task { @MainActor in
                     settings.webConversationPhase = phase
                 }
             }
+            coordinator.onComposerChanged = { owns in
+                // 原生输入条是否接管：false（网页正在提问/等权限确认）时原生条让位
+                Task { @MainActor in
+                    settings.nativeComposerActive = owns
+                }
+            }
             await prepareURL()
+        }
+        // 外壳请求刷新：重新探测基址 + 重注入 cookie，然后回到 /pair-app 入口
+        .onChange(of: reloadRequest) { _, _ in
+            Task { await handleReloadRequest() }
         }
         // 重新配对后 deviceId 变化 → 重新注入 cookie 并强制刷新
         .onChange(of: settings.deviceId) { _, _ in
@@ -160,6 +165,20 @@ struct WebConsoleView: View {
         }
 
         url = target
+        // 记住认证入口：刷新必须回到 /pair-app（局域网上的 / 是配对页）
+        coordinator.entryURL = target
+    }
+
+    /// 外壳请求的彻底刷新：重新探测基址（局域网/公网可能已切换）+ 重注入设备 cookie，
+    /// 再回到 /pair-app 入口加载。基址变了就交给 updateUIView（url 变化会自己加载）。
+    private func handleReloadRequest() async {
+        let previousHost = coordinator.entryURL?.host
+        loadError = nil
+        pairingFailed = false
+        await prepareURL()
+        guard loadError == nil else { return }
+        if coordinator.entryURL?.host != previousHost { return }
+        coordinator.reload()
     }
 
     /// 构造 dsh_pair 设备 cookie（与 web 服务端 deviceCookie 格式一致）
@@ -190,7 +209,9 @@ struct WebConsoleView: View {
                 .padding(.horizontal, 24)
             Button("重试") {
                 loadError = nil
-                Task { await prepareURL() }
+                // 必须显式 reload：prepareURL 只是重新算 url，宿主不变时
+                // updateUIView 不会触发新的加载（旧实现在这里点了没反应）
+                Task { await prepareURL(); coordinator.reload() }
             }
             .buttonStyle(.borderedProminent)
             Button("服务器设置") { showSetup = true }
@@ -236,14 +257,28 @@ final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptM
     var onLoaded: (() -> Void)?
     /// Web 壳里打开的会话变化回调（JS 回传 sessionId；无会话时为 nil）
     var onSessionChanged: ((String?) -> Void)?
-    /// Web 设置页"App 设置"按钮回调（JS postMessage → 唤起原生控制面板）
-    var onOpenControl: (() -> Void)?
     /// 会话页阶段变化回调（JS 回传 "hero" / "active" / "settling"；无会话页为 nil）
     var onPhaseChanged: ((String?) -> Void)?
+    /// 原生输入条是否接管网页输入（JS 回传 "native" / "web"）。
+    /// "web" 表示网页 composer 正被提问卡/权限确认接管 —— 此时原生输入条必须让位。
+    var onComposerChanged: ((Bool) -> Void)?
     /// 原生触发的网页导航结果（JS 回传 "opened" / "open-failed" / "created" / "create-failed"）
     var onNavResult: ((String) -> Void)?
     /// Web 内容进程崩溃后自动重载的次数（防止崩溃循环）
     private var processCrashCount = 0
+
+    /// 认证入口 URL（{base}/pair-app）。刷新必须回到它：
+    /// /pair-app 首帧脚本会把地址栏改写成 /（history.replaceState），而局域网来源的 /
+    /// 由配对页接管（root-auth 插件认领了精确的 /）——直接 webView.reload() 会看到
+    /// "设备未配对"，冷启动重新 load(/pair-app) 才正常。明文 HTTP 的局域网没有
+    /// service worker 兜底，所以必须由原生记住入口 URL。
+    var entryURL: URL?
+    /// 最近一次已知的会话 ID（刷新 / 崩溃自愈后用于自动回到原会话）
+    private var lastSessionId: String?
+    /// 本次页面加载完成后待恢复的会话 ID（nil = 无需恢复）
+    private var restoreSessionId: String?
+    /// 正在自动恢复会话：这期间打开失败不打扰用户（不报 onNavResult 错误）
+    private var isRestoringSession = false
 
     private weak var webView: WKWebView?
     private let pairingFailureMarkers = ["配对", "pair", "未授权", "授权", "设备"]
@@ -258,17 +293,16 @@ final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptM
 
     /// 接收 JS 回传的消息：
     /// - "dshSession"：当前打开的会话 ID
-    /// - "dshOpenControl"：Web 设置页里的"App 设置"按钮
+    /// - "dshPhase"：会话页阶段
+    /// - "dshComposer"：原生输入条是否接管（native / web）
+    /// - "dshNav"：原生触发的网页导航回执
     nonisolated func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         if message.name == "dshSession" {
             let body = message.body as? String
             let sessionId = (body?.isEmpty ?? true) ? nil : body
             Task { @MainActor [weak self] in
+                self?.lastSessionId = sessionId
                 self?.onSessionChanged?(sessionId)
-            }
-        } else if message.name == "dshOpenControl" {
-            Task { @MainActor [weak self] in
-                self?.onOpenControl?()
             }
         } else if message.name == "dshPhase" {
             let body = message.body as? String
@@ -276,10 +310,21 @@ final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptM
             Task { @MainActor [weak self] in
                 self?.onPhaseChanged?(phase)
             }
+        } else if message.name == "dshComposer" {
+            let owns = (message.body as? String) == "native"
+            Task { @MainActor [weak self] in
+                self?.onComposerChanged?(owns)
+            }
         } else if message.name == "dshNav" {
             let body = message.body as? String ?? ""
             Task { @MainActor [weak self] in
-                self?.onNavResult?(body)
+                guard let self else { return }
+                // 刷新后自动回原会话：失败不打扰用户（用户没主动点过）
+                if self.isRestoringSession {
+                    self.isRestoringSession = false
+                    return
+                }
+                self.onNavResult?(body)
             }
         }
     }
@@ -304,9 +349,21 @@ final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptM
         evaluate("window.__dshNewSession ? window.__dshNewSession() : false")
     }
 
-    /// 下拉刷新 / 手动重载
+    /// 下拉刷新 / 手动重载：回到认证入口 /pair-app，而不是地址栏里的当前地址。
+    /// 原因（局域网"刷新后显示未配对"的根因）：/pair-app 的首帧脚本会
+    /// history.replaceState(null, '', '/') 把地址栏改写成 /；而局域网来源的 /
+    /// 由配对页（lan-root-auth 插件认准的精确 / 路由）接管 —— 直接 webView.reload()
+    /// 请求的就是 /，于是看到"设备未配对"；冷启动重新 load(/pair-app) 带 dsh_pair
+    /// cookie 才正常。明文 HTTP 的局域网不是安全上下文，service worker 不注册，
+    /// 没有兜底，只能由原生记住入口 URL。
+    /// 顺带记住当前会话，加载完成后自动回到原会话。
     func reload() {
-        webView?.reload()
+        restoreSessionId = lastSessionId
+        if let entryURL {
+            webView?.load(URLRequest(url: entryURL))
+        } else {
+            webView?.reload()
+        }
     }
 
     /// 下拉刷新 target-action（UIRefreshControl 挂在滚动视图上）
@@ -331,6 +388,27 @@ final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptM
             // 页面就绪后再跑一次移动端适配（SPA 可能覆盖了最初的注入）
             webView.evaluateJavaScript(WebViewCoordinator.mobileAdaptationJS, completionHandler: nil)
             checkPairingFailure(webView)
+            restoreSessionIfNeeded()
+        }
+    }
+
+    /// 刷新/崩溃自愈后：等网页稳定，如果它没有自己回到原会话，就代理点击恢复。
+    /// 失败静默处理（用户没主动请求，不该弹错误）。
+    private func restoreSessionIfNeeded() {
+        guard let pending = restoreSessionId else { return }
+        restoreSessionId = nil
+        isRestoringSession = true
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            guard let self else { return }
+            if self.lastSessionId == nil {
+                self.openSession(pending)
+                // 兜底：网页一直不回执时别让"自动恢复"状态一直吞掉后续回执
+                try? await Task.sleep(nanoseconds: 6_000_000_000)
+                self.isRestoringSession = false
+            } else {
+                self.isRestoringSession = false
+            }
         }
     }
 
@@ -340,7 +418,7 @@ final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptM
         Task { @MainActor in
             if processCrashCount < 3 {
                 processCrashCount += 1
-                webView.reload()
+                reload()   // 回到 /pair-app 入口，而不是崩溃时的地址
             } else {
                 onLoadError?("网页渲染进程反复崩溃，请点「重试」或重启 App。")
             }
@@ -488,10 +566,10 @@ struct WebViewRepresentable: UIViewRepresentable {
         configuration.userContentController.addUserScript(userScript)
         // 会话检测回传通道：JS 把当前打开的会话 ID 发给原生层
         configuration.userContentController.add(context.coordinator, name: "dshSession")
-        // Web 设置页"App 设置"按钮回传通道
-        configuration.userContentController.add(context.coordinator, name: "dshOpenControl")
         // 会话页阶段回传通道（hero / active / settling → 原生输入条显隐）
         configuration.userContentController.add(context.coordinator, name: "dshPhase")
+        // 原生输入条接管回传通道（native / web → 提问/权限确认时原生条必须让位）
+        configuration.userContentController.add(context.coordinator, name: "dshComposer")
         // 原生触发的网页导航回执通道（打开会话 / 新建会话的结果）
         configuration.userContentController.add(context.coordinator, name: "dshNav")
 
@@ -686,11 +764,17 @@ enum WebViewCoordinator {
           '  padding-top: 0 !important;',
           '}',
           // 原生输入条接管（WebChatShellView）—— 互斥不变式：
-          // 只有当原生输入条**确实已经在屏幕上**时（JS 判定当前是会话页且拿到非空
-          // 会话 id，会给 <html> 打上 .dsh-native-composer），才隐藏网页自带的输入区。
-          // 判定与原生输入条的显示条件出自同一段 JS 的同一组取值，两者不可能同时为假
-          // —— 任何桥接失败/属性缺失都只是回到"网页输入条兜底"，绝不会出现"没有输入框"。
-          'html.dsh-native-composer [data-composer-seat] {',
+          // 只有当原生输入条**确实已经在屏幕上**时（JS 判定当前是会话页、拿到非空
+          // 会话 id，并且网页 composer 里确实存在真正的输入框 [data-composer-input]），
+          // 才隐藏网页那一条输入栏。判定与原生输入条的显示条件出自同一段 JS 的同一组
+          // 取值，两者不可能同时为假 —— 任何桥接失败/属性缺失都只是回到"网页输入条兜底"，
+          // 绝不会出现"没有输入框"。
+          //
+          // 关键：只隐藏"含输入框的那一层"（JS 打上 data-dsh-native-hide），
+          // 绝不能隐藏整个 [data-composer-seat] —— seat 里还挂着
+          // 「任务清单 TodoDock」「排队 QueueDock」等卡片，以及「提问 / 权限确认」
+          // 接管 composer 的卡片，它们必须保持可见可点。
+          'html.dsh-native-composer [data-dsh-native-hide="1"] {',
           '  display: none !important;',
           '}',
           '@media (max-width: 600px) {',
@@ -723,6 +807,7 @@ enum WebViewCoordinator {
         window.__dshSessionWatchStarted = true;
         var last = null;
         var lastPhase = null;
+        var lastOwns = null;
         function currentSessionId() {
           // 属性可能被渲染成空串（React 传 null 时 attribute=""），空串按"没有会话"处理
           var el = document.querySelector('[data-conversation-session]');
@@ -751,21 +836,55 @@ enum WebViewCoordinator {
           }
           return phase;
         }
+        // 网页 composer 里"承载真正输入框的那一条"：composer stack 的直接子元素中，
+        // 包含 [data-composer-input]（官方输入框的 contenteditable 标记）的那个。
+        // 任务清单(TodoDock)/排队(QueueDock) 是它的兄弟节点，不受影响；
+        // 提问(QuestionComposer)/权限确认(Approval) 接管 composer 时没有
+        // [data-composer-input]，返回 null → 原生条让位，网页接管卡完整可见。
+        function nativeInputBar() {
+          var field = document.querySelector('[data-composer-input]');
+          if (!field) { return null; }
+          // 优先：composer stack 的直接子元素里，包含输入框的那一个
+          var stacks = document.querySelectorAll('[class*="composerStack"]');
+          for (var s = 0; s < stacks.length; s++) {
+            var kids = stacks[s].children;
+            for (var i = 0; i < kids.length; i++) {
+              if (kids[i].contains(field)) { return kids[i]; }
+            }
+          }
+          // 兜底：从输入框往上找"父级是 composerStack"的那一层
+          var node = field;
+          while (node && node.parentElement) {
+            if (String(node.parentElement.className || '').indexOf('composerStack') >= 0) { return node; }
+            node = node.parentElement;
+          }
+          return null;
+        }
         // 原生输入条是否应当接管（与 Swift 侧 WebChatShellView.isConversationPage 同源：
-        // 有非空会话 id 且不在 hero 首屏）。为 true 时给 <html> 打标记，CSS 才隐藏
-        // 网页自带输入区；否则网页输入条始终可见 —— 桥接任何一环失败都不会没有输入框。
+        // 有非空会话 id、不在 hero 首屏，且网页确实渲染了输入框）。
+        // 返回 true = 原生条接管（隐藏网页那一条输入栏）；false = 网页输入条兜底。
         function syncNativeComposer(id, phase) {
           var root = document.documentElement;
-          if (!root || !root.classList) { return; }
-          var native = !!id && phase !== 'hero';
+          if (!root || !root.classList) { return false; }
+          var bar = nativeInputBar();
+          var native = !!id && phase !== 'hero' && !!bar;
+          // 先清掉上一轮的标记（React 重渲染会换元素，会话切换也会换输入条）
+          var marked = document.querySelectorAll('[data-dsh-native-hide="1"]');
+          for (var i = 0; i < marked.length; i++) {
+            if (marked[i] !== bar || !native) {
+              marked[i].removeAttribute('data-dsh-native-hide');
+            }
+          }
+          if (native && bar) { bar.setAttribute('data-dsh-native-hide', '1'); }
           if (native !== root.classList.contains('dsh-native-composer')) {
             root.classList.toggle('dsh-native-composer', native);
           }
+          return native;
         }
         function report() {
           var id = currentSessionId();
           var phase = currentPhase();
-          syncNativeComposer(id, phase);
+          var owns = syncNativeComposer(id, phase);
           if (id !== last) {
             last = id;
             try {
@@ -776,6 +895,14 @@ enum WebViewCoordinator {
             lastPhase = phase;
             try {
               window.webkit.messageHandlers.dshPhase.postMessage(phase || '');
+            } catch (e) { /* 原生侧未注册时忽略 */ }
+          }
+          // 原生输入条是否接管：false 时原生条必须让位（例如正在提问/等权限确认），
+          // 否则会把网页的接管卡片挡住，用户无法回答问题。
+          if (owns !== lastOwns) {
+            lastOwns = owns;
+            try {
+              window.webkit.messageHandlers.dshComposer.postMessage(owns ? 'native' : 'web');
             } catch (e) { /* 原生侧未注册时忽略 */ }
           }
         }
@@ -793,71 +920,15 @@ enum WebViewCoordinator {
         setInterval(report, 2000);
       }
 
-      // ---- Web 设置页注入"App 设置"按钮 ----
-      // 原生悬浮齿轮按钮已移除；改在 Web 设置页（data-shortcut-modal="settings"
-      // 模态）的头部注入一个"App 设置"按钮，点击 → postMessage → 原生控制面板。
-      // 幂等：同一元素存在时不重复创建；模态关闭（DOM 卸载）后自动随组件消失。
-      function injectAppSettingsButton() {
-        if (window.__dshAppSettingsBtnStarted) { return; }
-        window.__dshAppSettingsBtnStarted = true;
-        function findPanel() {
-          return document.querySelector('[data-shortcut-modal="settings"]');
-        }
-        function ensureButton() {
-          var panel = findPanel();
-          if (!panel) { return; }
-          if (document.getElementById('dsh-app-settings-btn')) { return; }
-          var btn = document.createElement('button');
-          btn.id = 'dsh-app-settings-btn';
-          btn.type = 'button';
-          btn.textContent = 'App 设置';
-          btn.style.cssText = [
-            'position:absolute',
-            'right:44px',
-            'top:12px',
-            'z-index:9999',
-            'padding:6px 12px',
-            'border-radius:999px',
-            'border:1px solid rgba(168,85,247,.45)',
-            'background:rgba(168,85,247,.14)',
-            'color:var(--dsw-alias-label-primary,#e9d5ff)',
-            'font-size:13px',
-            'font-weight:600',
-            'line-height:20px',
-            'cursor:pointer',
-            'display:inline-flex',
-            'align-items:center',
-            'gap:4px',
-            'min-height:32px',
-            'touch-action:manipulation',
-            'backdrop-filter:blur(6px)',
-            '-webkit-backdrop-filter:blur(6px)'
-          ].join(';');
-          btn.addEventListener('click', function () {
-            try {
-              window.webkit.messageHandlers.dshOpenControl.postMessage('open');
-            } catch (e) { /* 原生侧未注册时忽略 */ }
-          });
-          panel.style.position = 'relative';
-          panel.appendChild(btn);
-        }
-        ensureButton();
-        try {
-          new MutationObserver(function () { ensureButton(); }).observe(
-            document.documentElement, { childList: true, subtree: true }
-          );
-        } catch (e) {}
-        setInterval(ensureButton, 1000);
-      }
-
       // ---- 启动（DOM 就绪后执行全部注入）----
+      // 注：曾经在 Web 设置页里注入过一个"App 设置"按钮，现已移除——
+      // 原生顶栏的齿轮菜单就是唯一的 App 设置入口，网页里不再夹带原生入口。
       whenReady(function () {
         if (window.__dshMobileAdapted) { return; }
         window.__dshMobileAdapted = true;
         try { ensureViewport(); } catch (e) {}
         try { injectStyle(); } catch (e) {}
         startSessionWatch();
-        injectAppSettingsButton();
       });
     })();
     """

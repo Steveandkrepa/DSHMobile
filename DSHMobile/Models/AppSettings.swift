@@ -236,6 +236,12 @@ final class AppSettings: ObservableObject {
     /// "settling"=收尾 / nil=不在会话页。WebChatShellView 据此决定原生输入条显隐。
     @Published var webConversationPhase: String?
 
+    /// 网页是否允许原生输入条接管输入（由 JS 检测回传）。
+    /// 网页 composer 是一条 slot 链：任务清单/排队消息与输入框同层，提问卡/权限确认
+    /// 会接管（takeover）整个 composer 区域。只有它们都不在时原生条才出现，
+    /// 保证「任务清单可见、提问能回答、输入框永远存在」。
+    @Published var nativeComposerActive = false
+
     /// 我们自动设为"特别关注"的会话（区别于用户手动设置）
     private var autoFocusedSessionId: String?
 
