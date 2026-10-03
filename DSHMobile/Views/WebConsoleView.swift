@@ -359,6 +359,9 @@ final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptM
     /// 顺带记住当前会话，加载完成后自动回到原会话。
     func reload() {
         restoreSessionId = lastSessionId
+        // 页面即将重载：旧值不再代表"网页当前打开的会话"，
+        // 清空后 restoreSessionIfNeeded 才能区分"网页还没报"与"网页已自己恢复"
+        lastSessionId = nil
         if let entryURL {
             webView?.load(URLRequest(url: entryURL))
         } else {
