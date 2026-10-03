@@ -48,9 +48,12 @@ struct WebChatShellView: View {
         return "DSH"
     }
 
-    /// 是否在会话页（网页 hero 首屏不算：那里用网页自带输入框新建会话）
+    /// 是否显示原生输入条：已打开会话，且不在网页 hero 首屏
+    /// （hero = 新建/空白会话首屏，那里保留网页自带输入框，避免两条输入栏叠在一起）。
+    /// 用「会话 id 存在」做主判据、「phase != hero」做排除，这样即使网页阶段值
+    /// 意外缺失（拿到未知值）也仍然给得出输入条，不会把用户卡在无法输入的状态。
     private var isConversationPage: Bool {
-        settings.webConversationPhase == "active" || settings.webConversationPhase == "settling"
+        sessionId != nil && settings.webConversationPhase != "hero"
     }
 
     var body: some View {

@@ -578,11 +578,15 @@ enum WebViewCoordinator {
         // 会话页阶段：hero=首屏（新建会话）/ active=会话进行中 / settling=收尾。
         // 原生层据此决定是否显示原生输入条（hero 交给网页首屏输入框）。
         function currentPhase() {
-          var el = document.querySelector('[data-phase]');
-          var phase = el ? el.getAttribute('data-phase') : null;
+          // 优先读对话内容容器上的 data-content-phase：它与 data-conversation-session
+          // 挂在同一个元素上，值域是 hero / active / settling，正是我们要的页面阶段。
+          // 注意 composer 内部的可编辑框也带 data-phase，但取值是 plain / submitting /
+          // adjudicating 等编辑态，不能用来判断页面阶段，只作最后兜底。
+          var body = document.querySelector('[data-content-phase]');
+          var phase = body ? body.getAttribute('data-content-phase') : null;
           if (!phase) {
-            var emb = document.querySelector('[data-content-phase]');
-            phase = emb ? emb.getAttribute('data-content-phase') : null;
+            var el = document.querySelector('[data-phase]');
+            phase = el ? el.getAttribute('data-phase') : null;
           }
           return phase;
         }
