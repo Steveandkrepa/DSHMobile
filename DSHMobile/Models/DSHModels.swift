@@ -330,3 +330,178 @@ struct FollowSnapshot: Decodable {
     let projections: AnyCodable?
     let assistantStream: AnyCodable?
 }
+
+// MARK: - Agent 预设（模式）
+
+/// agentPresets/list 的响应
+struct AgentPresetRoster: Decodable {
+    let presets: [AgentPresetRow]
+}
+
+/// 一个 Agent 预设（标准/创造/极简/PTC/梁神模式…）
+struct AgentPresetRow: Decodable, Identifiable {
+    let id: String
+    let name: String?
+    let description: String?
+    let order: Int?
+    let isDefault: Bool?
+}
+
+/// agentPresets/read 的响应
+struct AgentPresetDocument: Decodable {
+    let agentPreset: String
+    let content: AnyCodable?
+    let name: String?
+    let description: String?
+}
+
+// MARK: - 模型目录
+
+/// session/modelCatalog 的响应（类型化）
+struct ModelCatalog: Decodable {
+    let defaultModel: ModelSelection?
+    let routableProviders: [String]?
+    let groups: [ModelProviderGroup]
+    let failures: [AnyCodable]?
+
+    enum CodingKeys: String, CodingKey {
+        case defaultModel = "default"
+        case routableProviders, groups, failures
+    }
+}
+
+struct ModelSelection: Decodable, Equatable {
+    let provider: String
+    let model: String
+    let reasoningEffort: String?
+
+    enum CodingKeys: String, CodingKey {
+        case provider, model, reasoningEffort
+    }
+}
+
+struct ModelProviderGroup: Decodable, Identifiable {
+    let id: String
+    let name: String?
+    let models: [ModelCatalogModel]
+}
+
+struct ModelCatalogModel: Decodable, Identifiable {
+    let id: String
+    let name: String?
+    let description: String?
+    let reasoning: ModelReasoning?
+}
+
+struct ModelReasoning: Decodable {
+    let efforts: [ModelReasoningEffort]
+    let defaultEffort: String?
+}
+
+struct ModelReasoningEffort: Decodable, Identifiable {
+    let id: String
+    let name: String?
+    let description: String?
+}
+
+// MARK: - 权限预设
+
+/// permissionPresets/catalog 的响应
+struct PermissionCatalog: Decodable {
+    let options: [PresetOption]
+    let defaultOptions: [PresetOption]?
+    let defaultPreset: String?
+}
+
+struct PresetOption: Decodable, Identifiable {
+    let value: String
+    let name: String?
+    let description: String?
+
+    var id: String { value }
+}
+
+// MARK: - 会话派生
+
+/// session/fork 的响应
+struct SessionForkValue: Decodable {
+    let sessionId: String
+}
+
+// MARK: - 会话投影便利访问
+
+extension SessionSummary {
+    /// 投影里的标题（projections.values.title）
+    var projectedTitle: String? {
+        projections?.objectValue?["values"]?.objectValue?["title"]?.stringValue
+    }
+
+    /// 投影里的 token 用量（projections.values.tokenUsage.totals）
+    var projectedTokenUsage: TokenTotals? {
+        guard let values = projections?.objectValue?["values"]?.objectValue,
+              let tu = values["tokenUsage"]?.objectValue,
+              let totals = tu["totals"]?.objectValue else { return nil }
+        return TokenTotals(
+            uncachedInputTokens: totals["uncachedInputTokens"]?.numberValue ?? 0,
+            outputTokens: totals["outputTokens"]?.numberValue ?? 0,
+            cacheReadTokens: totals["cacheReadTokens"]?.numberValue ?? 0,
+            cacheWriteTokens: totals["cacheWriteTokens"]?.numberValue ?? 0
+        )
+    }
+
+    /// 投影里的上下文占用（projections.values.contextPressure）
+    var projectedContextPressure: ContextPressureInfo? {
+        guard let values = projections?.objectValue?["values"]?.objectValue,
+              let cp = values["contextPressure"]?.objectValue else { return nil }
+        return ContextPressureInfo(
+            pressureTokens: cp["pressureTokens"]?.numberValue ?? 0,
+            projectedTokens: cp["projectedTokens"]?.numberValue,
+            contextWindow: cp["contextWindow"]?.numberValue
+        )
+    }
+
+    /// 投影里的当前模型选择（projections.values.modelSelection.next ?? lastUsed）
+    var projectedModelSelection: ModelSelection? {
+        guard let values = projections?.objectValue?["values"]?.objectValue,
+              let ms = values["modelSelection"]?.objectValue else { return nil }
+        let selection = ms["next"] ?? ms["lastUsed"]
+        guard let sel = selection?.objectValue,
+              let provider = sel["provider"]?.stringValue,
+              let model = sel["model"]?.stringValue else { return nil }
+        return ModelSelection(provider: provider, model: model, reasoningEffort: sel["reasoningEffort"]?.stringValue)
+    }
+
+    /// 投影里的当前 Agent 预设 id（projections.values.agentPreset）
+    var projectedAgentPreset: String? {
+        projections?.objectValue?["values"]?.objectValue?["agentPreset"]?.stringValue
+    }
+
+    /// 投影里的权限（projections.values.permissions.currentValue）
+    var projectedPermission: String? {
+        projections?.objectValue?["values"]?.objectValue?["permissions"]?.objectValue?["currentValue"]?.stringValue
+    }
+}
+
+/// token 用量（与 dsh-token-meter 的 wire view 对齐：四个累计桶）
+struct TokenTotals: Equatable {
+    let uncachedInputTokens: Double
+    let outputTokens: Double
+    let cacheReadTokens: Double
+    let cacheWriteTokens: Double
+
+    var total: Double { uncachedInputTokens + outputTokens + cacheReadTokens + cacheWriteTokens }
+
+    /// 简短格式化（K/M）
+    func short(_ value: Double) -> String {
+        if value >= 1_000_000 { return String(format: "%.1fM", value / 1_000_000) }
+        if value >= 1_000 { return String(format: "%.1fK", value / 1_000) }
+        return String(format: "%.0f", value)
+    }
+}
+
+/// 上下文占用信息
+struct ContextPressureInfo: Equatable {
+    let pressureTokens: Double
+    let projectedTokens: Double?
+    let contextWindow: Double?
+}

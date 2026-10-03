@@ -59,6 +59,14 @@
 	<key>NSCameraUsageDescription</key>
 	<string>需要访问相机，扫描 DSH 配对链接的二维码即可完成配对，无需手输令牌。</string>
 
+	<!-- 语音识别权限：聊天输入栏的语音输入（SFSpeechRecognizer） -->
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>需要访问语音识别，把你说的话转成文字输入到对话框。</string>
+
+	<!-- 麦克风权限：语音输入需要录音 -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>需要访问麦克风，录制你的语音并转成文字输入到对话框。</string>
+
 	<!-- 实时活动（灵动岛 / 锁屏 / 通知中心）：
 	     此 key 必须存在，否则 ActivityKit 的实时活动不会生效。
 	     本项目只做本地更新（Activity.update / end），

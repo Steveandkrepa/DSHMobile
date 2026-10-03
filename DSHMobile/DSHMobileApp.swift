@@ -1,14 +1,16 @@
 // ============================================================================
 //  DSHMobileApp.swift — 应用入口
 //  ----------------------------------------------------------------------------
-//  架构（App 化 Web 壳，iOS DSH 体验）：
+//  架构（原生主界面为主 + Web 组件兜底）：
 //    · 未配对 → SetupView（配置地址 + 配对令牌 / 扫码配对）
-//    · 已配对 → WebConsoleView（全屏沉浸式 WKWebView，官方 DSH Web 即 App 主体）
+//    · 已配对 → NativeMainView（原生 SwiftUI 主界面：会话列表 + 聊天）
+//      会话列表/聊天按官方 DSH Web 功能对齐（一个功能都不能少），
+//      复杂页面（官方完整 Web 设置）用 WKWebView 嵌入，App 设置用原生控制面板。
 //
 //  原生能力作为叠加层保留：
 //    · SessionWatcher 后台跟随「正在运行」的会话 → 驱动灵动岛/锁屏实时活动
 //      与本地通知（任务完成 / 失败 / 向你提问），并遵守会话级「特别关注」。
-//    · 通知点击（NotificationRouter）把 App 带回前台，回到 Web 壳。
+//    · 通知点击（NotificationRouter）把 App 带回前台，回到原生主界面。
 // ============================================================================
 import SwiftUI
 import UserNotifications
@@ -33,14 +35,14 @@ struct DSHMobileApp: App {
     }
 }
 
-/// 根视图：按配对状态分流（已配对 → Web 壳主界面）
+/// 根视图：按配对状态分流（已配对 → 原生主界面）
 struct RootView: View {
     @EnvironmentObject var settings: AppSettings
 
     var body: some View {
         Group {
             if settings.isPaired {
-                WebConsoleView()
+                NativeMainView()
             } else {
                 SetupView(mode: .initial)
             }
@@ -58,6 +60,21 @@ struct RootView: View {
             SessionWatcher.shared.start()
         } else {
             SessionWatcher.shared.stop()
+        }
+    }
+}
+
+/// 原生主界面：NavigationStack + 会话列表
+struct NativeMainView: View {
+    @State private var showingWebConsole = false
+
+    var body: some View {
+        NavigationStack {
+            SessionListView()
+        }
+        .sheet(isPresented: $showingWebConsole) {
+            // 完整 Web 界面兜底入口（官方 DSH Web 全功能）
+            WebConsoleView()
         }
     }
 }

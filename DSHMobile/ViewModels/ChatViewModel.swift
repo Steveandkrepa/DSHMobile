@@ -41,6 +41,8 @@ final class ChatViewModel: ObservableObject {
     @Published var errorMessage: String?
     @Published var title: String?
     @Published var canSend = true
+    /// 当前累计 token 文案（"输出 X · 总计 Y"），供原生界面展示
+    @Published private(set) var tokenSummary: String = ""
 
     // MARK: - 私有
     private var api: APIClient
@@ -248,6 +250,12 @@ final class ChatViewModel: ObservableObject {
         }
         // 新会话 / 新快照 → 清空 live 增量槽
         usageByTurnStep.removeAll()
+        refreshTokenSummary()
+    }
+
+    /// 把当前 tokenTotals 同步到对外可读的 tokenSummary
+    private func refreshTokenSummary() {
+        tokenSummary = tokensText()
     }
 
     // MARK: - durable 事件折叠
@@ -487,6 +495,7 @@ final class ChatViewModel: ObservableObject {
         }
         usageByTurnStep[key] = sample
         tokenTotals = tokenTotals + sample
+        refreshTokenSummary()
     }
 
     /// 格式化 token 数字：>=1000 → "1.2K"，否则原数

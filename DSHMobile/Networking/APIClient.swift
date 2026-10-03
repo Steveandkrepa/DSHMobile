@@ -190,9 +190,41 @@ struct APIClient {
 
     // MARK: - 模型目录（session/modelCatalog）
 
-    /// 模型目录（session/modelCatalog，无参数）
-    func modelCatalog() async throws -> AnyCodable? {
-        try await call("session/modelCatalog", args: [:], as: AnyCodable?.self)
+    /// 模型目录（session/modelCatalog，无参数，类型化）
+    func modelCatalog() async throws -> ModelCatalog {
+        try await call("session/modelCatalog", args: [:], as: ModelCatalog.self)
+    }
+
+    // MARK: - Agent 预设（模式）
+
+    /// Agent 预设列表（agentPresets/list，无参数）
+    func agentPresetsList() async throws -> AgentPresetRoster {
+        try await call("agentPresets/list", args: [:], as: AgentPresetRoster.self)
+    }
+
+    /// 读取单个 Agent 预设内容（agentPresets/read，参数 agentPreset）
+    func agentPresetsRead(agentPreset: String) async throws -> AgentPresetDocument {
+        try await call("agentPresets/read", args: ["agentPreset": agentPreset], as: AgentPresetDocument.self)
+    }
+
+    /// 为会话选择 Agent 预设（agentPresets/select，参数 agentId=sessionId + agentPreset）
+    @discardableResult
+    func selectAgentPreset(sessionId: String, agentPreset: String) async throws -> AnyCodable? {
+        try await call("agentPresets/select", args: ["agentId": sessionId, "agentPreset": agentPreset], as: AnyCodable?.self)
+    }
+
+    // MARK: - 权限预设
+
+    /// 权限预设目录（permissionPresets/catalog，无参数）
+    func permissionPresetsCatalog() async throws -> PermissionCatalog {
+        try await call("permissionPresets/catalog", args: [:], as: PermissionCatalog.self)
+    }
+
+    // MARK: - 会话派生
+
+    /// 派生（fork）一个会话（session/fork，参数 request.sessionId）
+    func forkSession(sessionId: String) async throws -> SessionForkValue {
+        try await call("session/fork", args: ["request": ["sessionId": sessionId]], as: SessionForkValue.self)
     }
 
     /// 配对：用一次性 token 换取 deviceId
