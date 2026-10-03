@@ -210,6 +210,24 @@ struct APIClient {
         return try await call("commands/execute", args: request, as: CommandExecuteResult.self)
     }
 
+    /// 会话可用命令目录（commands/list，参数 agentId）。
+    /// 原生输入条用它补上网页斜杠命令的能力：以 "/" 开头且命中目录的输入走
+    /// commands/execute，其余走 session/prompt。
+    struct CommandInfo: Decodable, Identifiable, Hashable {
+        struct Input: Decodable, Hashable {
+            let hint: String
+            let attachments: Bool?
+        }
+        let definitionId: String?
+        let name: String
+        let description: String
+        let input: Input?
+        var id: String { definitionId ?? name }
+    }
+    func listCommands(sessionId: String) async throws -> [CommandInfo] {
+        try await call("commands/list", args: ["agentId": sessionId], as: [CommandInfo].self)
+    }
+
     /// 取消当前回合（session/cancel，参数 request）
     struct CancelResult: Decodable {
         let accepted: Bool

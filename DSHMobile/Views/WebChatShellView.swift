@@ -19,19 +19,25 @@
 //    - 运行中 / 标题：SessionWatcher 轮询 session/list，按 activeWebSessionId 取摘要
 // ============================================================================
 
+import PhotosUI
 import SwiftUI
 import UniformTypeIdentifiers
 
 struct WebChatShellView: View {
     @EnvironmentObject var settings: AppSettings
+    @Environment(\.scenePhase) private var scenePhase
 
     /// 全局会话观察者：提供当前网页会话的摘要与「是否生成中」
     @ObservedObject private var watcher = SessionWatcher.shared
+
+    /// 网页协调器由外壳持有：这样顶栏/抽屉可以在网页里程序化切换会话
+    @State private var webCoordinator = Coordinator()
 
     @State private var showModePicker = false
     @State private var showModelPicker = false
     @State private var showPermissionPicker = false
     @State private var showAppSettings = false
+    @State private var showSessionDrawer = false
     @State private var confirmDangerPreset: String?
     @State private var errorMessage: String?
 
@@ -60,7 +66,7 @@ struct WebChatShellView: View {
         VStack(spacing: 0) {
             topBar
             // 网页控制台：不忽略安全区，顶/底原生栏各占一条安全区
-            WebConsoleView(fillSafeArea: false)
+            WebConsoleView(fillSafeArea: false, coordinator: webCoordinator)
             if isConversationPage {
                 NativeComposerBar(
                     sessionId: sessionId,
@@ -95,6 +101,50 @@ struct WebChatShellView: View {
                     .environmentObject(settings)
             }
         }
+        .sheet(isPresented: $showSessionDrawer) {
+            SessionDrawer(
+                currentSessionId: sessionId,
+                onOpen: { id in webCoordinator.openSession(id) },
+                onNewSession: { webCoordinator.newSession() },
+                onOpenSettings: {
+                    // 先收起抽屉再打开设置：同一层 sheet 不能同时压两个
+                    showSessionDrawer = false
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                        showAppSettings = true
+                    }
+                },
+                onReload: { webCoordinator.reload() },
+                onClose: { showSessionDrawer = false }
+            )
+            .environmentObject(settings)
+        }        .task {
+            // 原生发起的网页导航回执（打开会话 / 新建会话）
+            webCoordinator.onNavResult = { result in
+                Task { @MainActor in
+                    switch result {
+                    case "open-failed":
+                        errorMessage = "没能在网页里打开这个会话。请下拉刷新网页后重试，或直接在网页里选择。"
+                    case "create-failed":
+                        errorMessage = "没能在网页里新建会话。请下拉刷新网页后重试。"
+                    case "opened", "created":
+                        watcher.refreshNow()
+                    default:
+                        break
+                    }
+                }
+            }
+            watcher.refreshNow()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NotificationRouter.openSession)) { note in
+            // 点击「完成/失败/提问」通知：直接在网页里打开对应会话
+            if let id = note.userInfo?["sessionId"] as? String, !id.isEmpty {
+                webCoordinator.openSession(id)
+            }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            // 回到前台：刷新会话摘要（标题/运行状态），网页自身也会重连
+            if phase == .active { watcher.refreshNow() }
+        }
         .alert("错误", isPresented: Binding(
             get: { errorMessage != nil },
             set: { if !$0 { errorMessage = nil } }
@@ -121,7 +171,12 @@ struct WebChatShellView: View {
     // MARK: - 顶栏
 
     private var topBar: some View {
-        HStack(spacing: 16) {
+        HStack(spacing: 12) {
+            Button { showSessionDrawer = true } label: {
+                Image(systemName: "sidebar.left")
+            }
+            .accessibilityLabel("会话列表")
+
             Text(title)
                 .font(.subheadline.weight(.semibold))
                 .lineLimit(1)
@@ -152,14 +207,30 @@ struct WebChatShellView: View {
             .disabled(sessionId == nil)
             .accessibilityLabel("会话权限")
 
-            Button { showAppSettings = true } label: {
+            Button { webCoordinator.newSession() } label: {
+                Image(systemName: "square.and.pencil")
+            }
+            .accessibilityLabel("新建会话")
+
+            Menu {
+                Button {
+                    showAppSettings = true
+                } label: {
+                    Label("App 设置", systemImage: "gearshape")
+                }
+                Button {
+                    webCoordinator.reload()
+                } label: {
+                    Label("重新加载网页", systemImage: "arrow.clockwise")
+                }
+            } label: {
                 Image(systemName: "gearshape")
             }
             .accessibilityLabel("设置")
         }
-        .font(.system(size: 17))
+        .font(.system(size: 16))
         .foregroundStyle(.purple)
-        .padding(.horizontal, 16)
+        .padding(.horizontal, 14)
         .padding(.vertical, 8)
         .background(.bar)
     }
@@ -244,6 +315,11 @@ private struct NativeComposerBar: View {
     @State private var uploading = false
     @State private var isSending = false
     @State private var showDocumentPicker = false
+    @State private var showPhotoPicker = false
+    @State private var photoItem: PhotosPickerItem?
+    @State private var showCommandPicker = false
+    /// 命令执行结果（横幅展示，几秒后自动消失）
+    @State private var commandOutput: String?
     @StateObject private var speech = SpeechRecognizer()
     @FocusState private var inputFocused: Bool
 
@@ -258,33 +334,58 @@ private struct NativeComposerBar: View {
 
     var body: some View {
         VStack(spacing: 6) {
+            if let commandOutput {
+                commandBanner(commandOutput)
+            }
             if !attachments.isEmpty {
                 attachmentChips
             }
-            HStack(alignment: .bottom, spacing: 10) {
+            HStack(alignment: .bottom, spacing: 6) {
+                Button {
+                    showCommandPicker = true
+                } label: {
+                    Image(systemName: "terminal")
+                        .font(.system(size: 18))
+                        .foregroundStyle(.purple)
+                        .frame(width: 30, height: 36)
+                }
+                .accessibilityLabel("命令")
+                .disabled(sessionId == nil)
+
                 Button {
                     if !uploading { showDocumentPicker = true }
                 } label: {
                     if uploading {
                         ProgressView()
-                            .frame(width: 28, height: 28)
+                            .frame(width: 30, height: 36)
                     } else {
                         Image(systemName: "paperclip")
-                            .font(.system(size: 20))
+                            .font(.system(size: 18))
                             .foregroundStyle(.purple)
-                            .frame(width: 36, height: 36)
+                            .frame(width: 30, height: 36)
                     }
                 }
                 .accessibilityLabel("添加文件")
                 .disabled(sessionId == nil || uploading)
 
                 Button {
+                    if !uploading { showPhotoPicker = true }
+                } label: {
+                    Image(systemName: "photo")
+                        .font(.system(size: 18))
+                        .foregroundStyle(.purple)
+                        .frame(width: 30, height: 36)
+                }
+                .accessibilityLabel("添加照片")
+                .disabled(sessionId == nil || uploading)
+
+                Button {
                     toggleSpeech()
                 } label: {
                     Image(systemName: speech.state == .listening ? "mic.fill" : "mic")
-                        .font(.system(size: 20))
+                        .font(.system(size: 18))
                         .foregroundStyle(speech.state == .listening ? .white : .purple)
-                        .frame(width: 36, height: 36)
+                        .frame(width: 30, height: 36)
                         .background(speech.state == .listening ? Color.purple : Color.clear, in: Circle())
                 }
                 .accessibilityLabel(speech.state == .listening ? "停止语音输入" : "语音输入")
@@ -321,7 +422,7 @@ private struct NativeComposerBar: View {
                 .accessibilityLabel(isRunning ? "插话" : "发送")
                 .disabled(!canSend)
             }
-            .padding(.horizontal, 12)
+            .padding(.horizontal, 10)
             .padding(.vertical, 8)
         }
         .background(.bar)
@@ -338,6 +439,31 @@ private struct NativeComposerBar: View {
                 onError(error.localizedDescription)
             }
         }
+        .photosPicker(
+            isPresented: $showPhotoPicker,
+            selection: $photoItem,
+            matching: .images
+        )
+        .onChange(of: photoItem) { _, item in
+            guard let item else { return }
+            Task {
+                defer { photoItem = nil }
+                guard let data = try? await item.loadTransferable(type: Data.self) else {
+                    onError("无法读取所选照片")
+                    return
+                }
+                let ext = item.supportedContentTypes.first?.preferredFilenameExtension ?? "jpg"
+                await upload(data: data, name: "photo-\(Self.timestamp()).\(ext)")
+            }
+        }
+        .sheet(isPresented: $showCommandPicker) {
+            if let sessionId {
+                CommandPickerSheet(sessionId: sessionId) { command in
+                    pick(command)
+                }
+                .environmentObject(settings)
+            }
+        }
         .onChange(of: speech.state) { _, newState in
             // 语音停止 → 把最终文本填入输入框
             if newState == .idle, !speech.transcript.isEmpty {
@@ -345,6 +471,29 @@ private struct NativeComposerBar: View {
                 speech.reset()
             }
         }
+    }
+
+    /// 命令执行结果横幅（网页斜杠命令在原生输入条里的等价物）
+    private func commandBanner(_ text: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "terminal.fill")
+                .font(.caption2)
+                .foregroundStyle(.purple)
+            Text(text)
+                .font(.caption)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Button {
+                commandOutput = nil
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .accessibilityLabel("关闭命令结果")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(.purple.opacity(0.12))
     }
 
     private var attachmentChips: some View {
@@ -380,7 +529,8 @@ private struct NativeComposerBar: View {
 
     // MARK: - 发送 / 停止
 
-    /// 发送：生成中发新消息 = 插话（mode=steer），空闲 = queue
+    /// 发送："/" 开头走命令执行（commands/execute，与网页斜杠命令同源），
+    /// 其余走会话消息；生成中发新消息 = 插话（mode=steer），空闲 = queue
     @MainActor
     private func send() {
         guard let sessionId else { return }
@@ -388,26 +538,65 @@ private struct NativeComposerBar: View {
         let atts = attachments
         guard !text.isEmpty || !atts.isEmpty else { return }
         let mode = isRunning ? "steer" : "queue"
+        let isCommand = text.hasPrefix("/")
         inputText = ""
         attachments = []
         isSending = true
         Task {
             let api = APIClient(settings: settings)
             do {
-                _ = try await api.prompt(
-                    sessionId: sessionId,
-                    text: text,
-                    mode: mode,
-                    attachments: atts.map(\.receiptId)
-                )
+                if isCommand {
+                    let result = try await api.runCommand(sessionId: sessionId, line: text)
+                    if result.result?.kind == "error" {
+                        onError(result.result?.text ?? "命令执行失败")
+                    } else if let output = result.result?.text, !output.isEmpty {
+                        showCommandOutput(output)
+                    }
+                } else {
+                    let result = try await api.prompt(
+                        sessionId: sessionId,
+                        text: text,
+                        mode: mode,
+                        attachments: atts.map(\.receiptId)
+                    )
+                    if !result.accepted {
+                        throw NSError(
+                            domain: "DSHMobile",
+                            code: -1,
+                            userInfo: [NSLocalizedDescriptionKey: "服务器没有接受这条消息，请稍后重试。"]
+                        )
+                    }
+                }
             } catch {
                 // 失败回填，避免用户输入丢失
                 if inputText.isEmpty { inputText = text }
                 if attachments.isEmpty { attachments = atts }
-                onError("发送失败：\(error.localizedDescription)")
+                onError(isCommand ? "命令执行失败：\(error.localizedDescription)" : "发送失败：\(error.localizedDescription)")
             }
             isSending = false
             onActivity()
+        }
+    }
+
+    /// 选中命令：需要参数的插入输入框（保留补充参数的机会），无需参数的立即执行
+    @MainActor
+    private func pick(_ command: APIClient.CommandInfo) {
+        if command.input == nil {
+            inputText = "/" + command.name
+            send()
+        } else {
+            inputText = "/" + command.name + " "
+            inputFocused = true
+        }
+    }
+
+    /// 命令结果横幅：6 秒后自动消失
+    @MainActor
+    private func showCommandOutput(_ text: String) {
+        commandOutput = text
+        Task {
+            try? await Task.sleep(nanoseconds: 6_000_000_000)
+            if commandOutput == text { commandOutput = nil }
         }
     }
 
@@ -430,7 +619,7 @@ private struct NativeComposerBar: View {
     /// 选择文件 → 读取并上传，成功后追加到附件列表
     @MainActor
     private func attachFile(from url: URL) {
-        guard let sessionId, !uploading else { return }
+        guard !uploading else { return }
         let didStart = url.startAccessingSecurityScopedResource()
         defer { if didStart { url.stopAccessingSecurityScopedResource() } }
         let name = url.lastPathComponent
@@ -438,17 +627,29 @@ private struct NativeComposerBar: View {
             onError("无法读取文件 \(name)")
             return
         }
+        Task { await upload(data: data, name: name) }
+    }
+
+    /// 上传附件（文件 / 照片共用）：成功后追加到附件列表，随下一条消息发送
+    @MainActor
+    private func upload(data: Data, name: String) async {
+        guard let sessionId else { return }
         uploading = true
-        Task {
-            let api = APIClient(settings: settings)
-            do {
-                let result = try await api.uploadFile(sessionId: sessionId, name: name, data: data)
-                attachments.append(ShellAttachment(receiptId: result.receiptId, name: name))
-            } catch {
-                onError("上传失败：\(error.localizedDescription)")
-            }
-            uploading = false
+        defer { uploading = false }
+        let api = APIClient(settings: settings)
+        do {
+            let result = try await api.uploadFile(sessionId: sessionId, name: name, data: data)
+            attachments.append(ShellAttachment(receiptId: result.receiptId, name: name))
+        } catch {
+            onError("上传失败：\(error.localizedDescription)")
         }
+    }
+
+    /// 照片文件名用的时间戳
+    private static func timestamp() -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        return formatter.string(from: Date())
     }
 
     // MARK: - 语音
@@ -470,5 +671,95 @@ private struct NativeComposerBar: View {
         guard !text.isEmpty else { return }
         if !inputText.isEmpty { inputText += " " }
         inputText += text
+    }
+}
+
+// ============================================================================
+//  命令面板：原生输入条补上网页的斜杠命令能力
+//  网页 composer 被隐藏后，用户输入 "/xxx" 若直接走 session/prompt 会被当成
+//  普通消息；这里从 commands/list 取会话可用命令，选中后由输入条改用
+//  commands/execute 执行（与网页斜杠命令同一个服务端入口）。
+// ============================================================================
+
+private struct CommandPickerSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject var settings: AppSettings
+
+    let sessionId: String
+    let onPick: (APIClient.CommandInfo) -> Void
+
+    @State private var commands: [APIClient.CommandInfo] = []
+    @State private var isLoading = true
+    @State private var errorMessage: String?
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if isLoading {
+                    HStack {
+                        ProgressView()
+                        Text("正在读取命令…")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                } else if let errorMessage {
+                    Label(errorMessage, systemImage: "exclamationmark.triangle")
+                        .font(.footnote)
+                        .foregroundStyle(.orange)
+                } else if commands.isEmpty {
+                    Text("这个会话没有可用命令。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Section {
+                        ForEach(commands) { command in
+                            Button {
+                                onPick(command)
+                                dismiss()
+                            } label: {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text("/" + command.name)
+                                        .font(.subheadline.weight(.medium))
+                                        .foregroundStyle(.purple)
+                                    Text(command.description)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                    if let hint = command.input?.hint, !hint.isEmpty {
+                                        Text(hint)
+                                            .font(.caption2)
+                                            .foregroundStyle(.tertiary)
+                                    }
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    } footer: {
+                        Text("与网页里的斜杠命令一致；需要参数的命令会先填入输入框，补全后再发送。")
+                    }
+                }
+            }
+            .listStyle(.insetGrouped)
+            .navigationTitle("命令")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("关闭") { dismiss() }
+                }
+            }
+            .task { await load() }
+        }
+        .presentationDetents([.medium, .large])
+    }
+
+    private func load() async {
+        do {
+            commands = try await APIClient(settings: settings).listCommands(sessionId: sessionId)
+            errorMessage = nil
+        } catch {
+            errorMessage = "读取命令失败：\(error.localizedDescription)"
+        }
+        isLoading = false
     }
 }
