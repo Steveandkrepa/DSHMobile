@@ -232,6 +232,10 @@ final class AppSettings: ObservableObject {
     /// 当前 Web 壳里打开的会话（由 JS 检测回传）；用于"打开的会话默认特别关注"
     @Published private(set) var activeWebSessionId: String?
 
+    /// 网页会话页阶段（由 JS 检测回传）："hero"=首屏新建会话 / "active"=会话进行中 /
+    /// "settling"=收尾 / nil=不在会话页。WebChatShellView 据此决定原生输入条显隐。
+    @Published var webConversationPhase: String?
+
     /// 我们自动设为"特别关注"的会话（区别于用户手动设置）
     private var autoFocusedSessionId: String?
 

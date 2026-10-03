@@ -28,6 +28,18 @@ import WebKit
 struct WebConsoleView: View {
     @EnvironmentObject var settings: AppSettings
 
+    /// 是否由本视图忽略安全区铺满全屏。
+    /// · true（默认，独立作为主界面使用时）：铺满全屏，网页内部自行避让状态栏/Home 条。
+    /// · false（被 WebChatShellView 作为主体嵌入时）：安全区交给外层原生顶栏/输入条处理，
+    ///   否则网页视图会盖住原生栏，且网页内 env(safe-area-inset-*) 会与原生栏重复补偿。
+    var fillSafeArea: Bool = true
+
+    /// 显式初始化：只暴露 fillSafeArea（其余 @State 均自带默认值）。
+    /// 嵌入外壳时用 WebConsoleView(fillSafeArea: false)。
+    init(fillSafeArea: Bool = true) {
+        self.fillSafeArea = fillSafeArea
+    }
+
     @State private var url: URL?
     @State private var loadError: String?
     @State private var pairingFailed = false
@@ -51,7 +63,7 @@ struct WebConsoleView: View {
                     onProgress: { progress = $0 },
                     onLoaded: { isLoaded = true }
                 )
-                .ignoresSafeArea(edges: .all)
+                .modifier(SafeAreaFiller(enabled: fillSafeArea))
                 .overlay(alignment: .top) {
                     // 细进度条：仅加载中显示
                     if progress < 1 {
@@ -95,6 +107,12 @@ struct WebConsoleView: View {
                 // Web 设置页里的"App 设置"按钮 → 唤起原生控制面板
                 Task { @MainActor in
                     showControlSheet = true
+                }
+            }
+            coordinator.onPhaseChanged = { phase in
+                // 会话页阶段 → 写入 settings，外层 WebChatShellView 据此显隐原生输入条
+                Task { @MainActor in
+                    settings.webConversationPhase = phase
                 }
             }
             await prepareURL()
@@ -217,6 +235,8 @@ final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptM
     var onSessionChanged: ((String?) -> Void)?
     /// Web 设置页"App 设置"按钮回调（JS postMessage → 唤起原生控制面板）
     var onOpenControl: (() -> Void)?
+    /// 会话页阶段变化回调（JS 回传 "hero" / "active" / "settling"；无会话页为 nil）
+    var onPhaseChanged: ((String?) -> Void)?
 
     private weak var webView: WKWebView?
     private let pairingFailureMarkers = ["配对", "pair", "未授权", "授权", "设备"]
@@ -242,6 +262,12 @@ final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptM
         } else if message.name == "dshOpenControl" {
             Task { @MainActor [weak self] in
                 self?.onOpenControl?()
+            }
+        } else if message.name == "dshPhase" {
+            let body = message.body as? String
+            let phase = (body?.isEmpty ?? true) ? nil : body
+            Task { @MainActor [weak self] in
+                self?.onPhaseChanged?(phase)
             }
         }
     }
@@ -377,6 +403,22 @@ final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptM
     }
 }
 
+// MARK: - 安全区铺满开关
+
+/// 按需给内容套上 `ignoresSafeArea(.all)`。
+/// 嵌入原生外壳时必须关闭，否则 WKWebView 会盖住原生顶栏/输入条。
+private struct SafeAreaFiller: ViewModifier {
+    let enabled: Bool
+
+    func body(content: Content) -> some View {
+        if enabled {
+            content.ignoresSafeArea(edges: .all)
+        } else {
+            content
+        }
+    }
+}
+
 // MARK: - WebViewRepresentable（UIViewRepresentable 封装）
 
 struct WebViewRepresentable: UIViewRepresentable {
@@ -402,6 +444,8 @@ struct WebViewRepresentable: UIViewRepresentable {
         configuration.userContentController.add(context.coordinator, name: "dshSession")
         // Web 设置页"App 设置"按钮回传通道
         configuration.userContentController.add(context.coordinator, name: "dshOpenControl")
+        // 会话页阶段回传通道（hero / active / settling → 原生输入条显隐）
+        configuration.userContentController.add(context.coordinator, name: "dshPhase")
 
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.allowsBackForwardNavigationGestures = true
@@ -489,6 +533,14 @@ enum WebViewCoordinator {
           '[role="dialog"] [class*="topbar"], [data-shortcut-modal] [class*="topbar"] {',
           '  padding-top: 0 !important;',
           '}',
+          // 原生输入条接管（WebChatShellView）：官方会话页的 composer 隐藏，
+          // 由原生底栏统一承载输入/发送/插话/停止，避免出现两条输入栏。
+          // 仅隐藏 phase=active/settling（会话进行中）的输入区；phase=hero 的首屏
+          // 输入框保留，网页原生的「新建会话」流程不受影响。
+          '[data-phase="active"] [data-composer-seat], [data-phase="settling"] [data-composer-seat],',
+          '[data-content-phase="active"] [data-composer-seat], [data-content-phase="settling"] [data-composer-seat] {',
+          '  display: none !important;',
+          '}',
           '@media (max-width: 600px) {',
           // 核心：桌面版把内容宽度 clamp 在 680px+，在 iPhone 上必然横向溢出
           // → 覆盖为视口宽度，聊天内容与输入框不再被挤出去
@@ -518,9 +570,21 @@ enum WebViewCoordinator {
         if (window.__dshSessionWatchStarted) { return; }
         window.__dshSessionWatchStarted = true;
         var last = null;
+        var lastPhase = null;
         function currentSessionId() {
           var el = document.querySelector('[data-conversation-session]');
           return el ? el.getAttribute('data-conversation-session') : null;
+        }
+        // 会话页阶段：hero=首屏（新建会话）/ active=会话进行中 / settling=收尾。
+        // 原生层据此决定是否显示原生输入条（hero 交给网页首屏输入框）。
+        function currentPhase() {
+          var el = document.querySelector('[data-phase]');
+          var phase = el ? el.getAttribute('data-phase') : null;
+          if (!phase) {
+            var emb = document.querySelector('[data-content-phase]');
+            phase = emb ? emb.getAttribute('data-content-phase') : null;
+          }
+          return phase;
         }
         function report() {
           var id = currentSessionId();
@@ -528,6 +592,13 @@ enum WebViewCoordinator {
             last = id;
             try {
               window.webkit.messageHandlers.dshSession.postMessage(id || '');
+            } catch (e) { /* 原生侧未注册时忽略 */ }
+          }
+          var phase = currentPhase();
+          if (phase !== lastPhase) {
+            lastPhase = phase;
+            try {
+              window.webkit.messageHandlers.dshPhase.postMessage(phase || '');
             } catch (e) { /* 原生侧未注册时忽略 */ }
           }
         }
@@ -538,7 +609,7 @@ enum WebViewCoordinator {
             childList: true,
             subtree: true,
             attributes: true,
-            attributeFilter: ['data-conversation-session']
+            attributeFilter: ['data-conversation-session', 'data-phase', 'data-content-phase']
           });
         } catch (e) {}
         // 兜底轮询（SPA 极端重渲染下 MutationObserver 可能漏报）

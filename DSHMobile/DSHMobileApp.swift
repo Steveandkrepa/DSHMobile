@@ -64,17 +64,10 @@ struct RootView: View {
     }
 }
 
-/// 原生主界面：NavigationStack + 会话列表
+/// 主界面：官方网页控制台承载对话流，原生只提供顶栏与底部输入条。
+/// 见 WebChatShellView.swift（会话列表/对话流/仪表盘都用网页，避免与网页状态不一致）。
 struct NativeMainView: View {
-    @State private var showingWebConsole = false
-
     var body: some View {
-        NavigationStack {
-            SessionListView()
-        }
-        .sheet(isPresented: $showingWebConsole) {
-            // 完整 Web 界面兜底入口（官方 DSH Web 全功能）
-            WebConsoleView()
-        }
+        WebChatShellView()
     }
 }

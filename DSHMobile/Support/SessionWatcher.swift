@@ -12,8 +12,13 @@
 import Foundation
 
 @MainActor
-final class SessionWatcher {
+final class SessionWatcher: ObservableObject {
     static let shared = SessionWatcher()
+
+    /// 当前网页壳打开的会话摘要（用于原生顶栏标题/模型/模式/权限显示）
+    @Published private(set) var activeSummary: SessionSummary?
+    /// 当前打开的会话是否正在生成（原生输入条据此决定「发送」还是「插话/停止」）
+    @Published private(set) var activeIsRunning = false
 
     private var pollTask: Task<Void, Never>?
     private var engine: ChatViewModel?
@@ -35,6 +40,8 @@ final class SessionWatcher {
         pollTask?.cancel()
         pollTask = nil
         stopEngine()
+        activeSummary = nil
+        activeIsRunning = false
     }
 
     // MARK: - 轮询
@@ -46,11 +53,23 @@ final class SessionWatcher {
         }
     }
 
+    /// 立即刷新一次（发送/停止后调用，让原生输入条状态尽快收敛）
+    func refreshNow() {
+        Task { await pollOnce() }
+    }
+
     private func pollOnce() async {
         guard settings.isPaired else { return }
         let api = APIClient(settings: settings)
         do {
             let sessions = try await api.listSessions()
+            // 当前打开的会话（含未运行的）：供原生顶栏显示标题/模型/模式/权限
+            if let activeId = settings.activeWebSessionId {
+                activeSummary = sessions.first { $0.sessionId == activeId }
+            } else {
+                activeSummary = nil
+            }
+            activeIsRunning = activeSummary?.running ?? false
             let running = sessions.filter { $0.running }
             // 优先跟随当前打开的会话（Web 壳 JS 检测回传）；否则跟随最近更新的运行中会话
             var target = running.first { $0.sessionId == settings.activeWebSessionId }

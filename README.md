@@ -2,23 +2,25 @@
 
 纯 Swift / SwiftUI 实现的 [DSH（DeepSeek Harness）](https://github.com/deepseek-ai/dsh) iOS 客户端。
 通过 DSH 的「远程设备」配对机制，在 iPhone / iPad 上获得与浏览器一致的 DSH 体验，
-**原生 SwiftUI 主界面为主 + 复杂功能 Web 组件嵌入**：会话列表与聊天全部原生实现，
-设置等复杂页面（官方设置命名空间 / 凭证 / 模型管理）用 WKWebView 嵌入官方 DSH Web。
+**对话流用官方 DSH Web 承载、按键用原生**：会话列表 / 对话流 / 工具结果由嵌入式官方 Web 控制台渲染，
+与网页端状态完全一致；原生层只补「按键」——顶栏（模式 / 模型 / 会话权限 / 设置）与
+底部输入条（文本 / 语音 / 附件 / 发送·插话 / 停止），并叠加通知、灵动岛等系统能力。
 
 ## 功能
 
-- 🏠 **原生 SwiftUI 主界面**：会话列表 + 聊天界面全部原生实现，功能对齐官方 DSH Web
-  - 会话列表：标题 / 时间 / 工作目录 / 运行状态 / **累计 token 用量** / 权限徽标；
-    新建会话可选 Agent 预设模式、重命名、派生（fork）、左滑 / 长按设置「特别关注」
-  - 聊天界面：流式输出（增量文本 + 光标）、思考过程折叠（流式期间自动展开）、工具调用胶囊、
-    **语音输入**（SFSpeechRecognizer + 麦克风权限）、**模式切换**（Agent 预设，含「梁神模式」）、
-    **模型切换**（modelCatalog 分组 + 推理强度）、**会话权限设置**（permissionPresets/catalog + /permission）、
-    **添加文件**（文件选择器 → 上传 → 作为附件随消息发送，气泡内胶囊展示）、
-    **插话**（生成中直接发送新消息会以 steer 模式打断并续入）、
-    **智能自动滚动**（新消息跟随；流式增量仅在接近底部时跟随且不带动画，避免打断阅读）、
-    工具栏实时 token 用量、停止生成
-- 🌐 **Web 组件兜底**：完整官方 DSH Web（设置 · 凭证 · 模型管理…全功能）以 WKWebView 嵌入，
-  移动端响应式适配（viewport / 防裁切 / 16px 输入 / 触控目标）+ 新窗口链接壳内打开
+- 🖥️ **主界面：网页承载对话流 + 原生按键**
+  - 会话列表、消息流、思考过程、工具调用、流式输出全部由嵌入式官方 DSH Web 控制台渲染，
+    与网页端同一份 UI 状态 —— 不会出现「App 里多出网页没有的会话」或「重复的历史消息」
+  - **原生顶栏**：当前会话标题 + 运行中指示 + 模式（Agent 预设）/ 模型 / 会话权限 / App 设置
+  - **原生底部输入条**：文本输入、**语音输入**（SFSpeechRecognizer）、**添加文件**
+    （文件选择器 → fileUploads/upload → 随消息发送）、发送（生成中自动转为 **steer 插话**）、停止生成
+  - 网页自带的输入条在会话页自动隐藏（注入 CSS），仅首屏「新建会话」保留网页输入框；
+    原生栏用真实布局（VStack）分段，不需要任何 CSS 高度补偿
+- 🧱 **完整原生实现仍保留在源码中**：`SessionListView` + `ChatView` 是一套纯原生会话列表 / 聊天界面
+  （流式、思考折叠、工具胶囊、模式 / 模型 / 权限、附件、插话、智能自动滚动），
+  目前不再作为默认入口，可作为无 Web 环境的备用实现
+- 🌐 **Web 控制台**：完整官方 DSH Web（会话 · 设置 · 凭证 · 模型管理…全功能）以 WKWebView 嵌入，
+  移动端响应式适配（viewport / 防裁切 / 16px 输入 / 触控目标 / 安全区）+ 新窗口链接壳内打开
 - 🔗 **配对连接**：用配对令牌换 deviceId，长期有效（配合服务器端永久令牌配置）；**支持扫码配对**——
   直接扫描配对链接的二维码即可完成，无需手输令牌；配对后自动向服务器请求回局域网/公网地址补全
 - 📶 **智能路由**：自动检测——同一 WiFi 下走局域网直连（低延迟），否则走公网中转（Cloudflare 隧道）
@@ -79,7 +81,7 @@ DSHMobile/
 │   ├── Info.plist                 # 含 ATS（允许局域网明文 http）+ 相机/语音/麦克风权限
 │   └── Assets.xcassets/           # 图标 / 主题色
 ├── DSHMobile/
-│   ├── DSHMobileApp.swift         # App 入口 + 根视图分流（配对 → 原生主界面）
+│   ├── DSHMobileApp.swift         # App 入口 + 根视图分流（配对 → WebChatShellView）
 │   ├── Models/
 │   │   ├── DSHModels.swift        # 与 DSH 线上协议对齐的数据模型 + 投影便利
 │   │   └── AppSettings.swift      # 连接配置（地址/凭证/自动检测）+ 会话关注
@@ -94,12 +96,13 @@ DSHMobile/
 │   │   ├── SessionWatcher.swift      # 后台会话跟随器（轮询运行中会话）
 │   │   └── SpeechRecognizer.swift    # 语音输入（SFSpeechRecognizer + AVAudioEngine）
 │   └── Views/
-│       ├── SessionListView.swift  # 原生会话列表（token/权限/关注/新建/重命名/fork）
-│       ├── ChatView.swift         # 原生聊天（流式/思考/工具/语音/模式/模型切换）
+│       ├── WebChatShellView.swift # 主界面：网页控制台承载对话流 + 原生顶栏/输入条
+│       ├── SessionListView.swift  # 原生会话列表（备用：token/权限/关注/新建/重命名/fork）
+│       ├── ChatView.swift         # 原生聊天（备用：流式/思考/工具/语音/模式/模型切换）
 │       ├── AppSettingsView.swift  # 原生 App 设置面板
 │       ├── SetupView.swift        # 配对 / 服务器设置（含扫码配对）
 │       ├── QRScannerView.swift    # VisionKit 二维码扫描（配对用）
-│       ├── WebConsoleView.swift   # Web 组件兜底：WKWebView 承载官方 DSH Web + 移动端适配
+│       ├── WebConsoleView.swift   # WKWebView 承载官方 DSH Web + 移动端适配 + 会话/阶段回传
 │       └── WebShellControlSheet.swift # App 控制面板（通知/灵动岛/会话关注）
 ├── DSHMobileWidgets/              # 灵动岛 / 锁屏 Widget 扩展
 │   ├── TaskProgressAttributes.swift
