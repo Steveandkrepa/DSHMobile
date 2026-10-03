@@ -40,6 +40,8 @@ struct WebChatShellView: View {
     @State private var showSessionDrawer = false
     @State private var confirmDangerPreset: String?
     @State private var errorMessage: String?
+    /// 每 +1 请求一次网页彻底刷新（WebConsoleView 监听它并重新探测基址 + 回到 /pair-app）
+    @State private var reloadNonce = 0
 
     private var sessionId: String? {
         settings.activeWebSessionId
@@ -54,29 +56,46 @@ struct WebChatShellView: View {
         return "DSH"
     }
 
-    /// 是否显示原生输入条：已打开会话，且不在网页 hero 首屏
-    /// （hero = 新建/空白会话首屏，那里保留网页自带输入框，避免两条输入栏叠在一起）。
-    /// 用「会话 id 存在」做主判据、「phase != hero」做排除，这样即使网页阶段值
-    /// 意外缺失（拿到未知值）也仍然给得出输入条，不会把用户卡在无法输入的状态。
+    /// 是否显示原生输入条。
+    /// 三个条件缺一不可：
+    ///  1. 已打开会话（sessionId != nil）
+    ///  2. 不在网页 hero 首屏（hero 保留网页输入框，避免两条输入栏叠加）
+    ///  3. 网页没有把 composer 区域让给「提问卡 / 权限确认」等接管视图
+    ///     （nativeComposerActive 由 JS 实测网页输入框仍在 DOM 里才会为 true）
+    /// 第 3 条是「提问回答功能必须保留」的关键：网页在等用户回答时，原生条让位，
+    /// 用户看到的是网页的提问卡，可以直接点选/输入答案。
     private var isConversationPage: Bool {
-        sessionId != nil && settings.webConversationPhase != "hero"
+        sessionId != nil
+            && settings.webConversationPhase != "hero"
+            && settings.nativeComposerActive
+    }
+
+    /// 请求网页彻底刷新（重新探测基址 + 重注入 cookie 后回到 /pair-app 入口）。
+    /// 不能直接 webView.reload()：/pair-app 会把地址栏改写成 /，而局域网上的 /
+    /// 是配对页，直接重载会显示「未配对」。
+    private func requestWebReload() {
+        reloadNonce += 1
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            topBar
-            // 网页控制台：不忽略安全区，顶/底原生栏各占一条安全区
-            WebConsoleView(fillSafeArea: false, coordinator: webCoordinator)
-            if isConversationPage {
-                NativeComposerBar(
-                    sessionId: sessionId,
-                    isRunning: watcher.activeIsRunning,
-                    onError: { errorMessage = $0 },
-                    onActivity: { watcher.refreshNow() }
-                )
+        // 光斑背景 + 悬浮玻璃顶栏/输入条：顶栏与输入条四周留边，
+        // 玻璃能采到底下的彩色光斑，才有"液态玻璃"的折射感。
+        ZStack {
+            AuroraBackground()
+            VStack(spacing: 0) {
+                topBar
+                // 网页控制台：不忽略安全区，顶/底原生栏各占一条安全区
+                WebConsoleView(fillSafeArea: false, coordinator: webCoordinator, reloadRequest: reloadNonce)
+                if isConversationPage {
+                    NativeComposerBar(
+                        sessionId: sessionId,
+                        isRunning: watcher.activeIsRunning,
+                        onError: { errorMessage = $0 },
+                        onActivity: { watcher.refreshNow() }
+                    )
+                }
             }
         }
-        .background(Color.black.ignoresSafeArea())
         .sheet(isPresented: $showModelPicker) {
             ModelPickerSheet(current: summary?.projectedModelSelection) { selection in
                 Task { await selectModel(selection) }
@@ -113,11 +132,12 @@ struct WebChatShellView: View {
                         showAppSettings = true
                     }
                 },
-                onReload: { webCoordinator.reload() },
+                onReload: { requestWebReload() },
                 onClose: { showSessionDrawer = false }
             )
             .environmentObject(settings)
-        }        .task {
+        }
+        .task {
             // 原生发起的网页导航回执（打开会话 / 新建会话）
             webCoordinator.onNavResult = { result in
                 Task { @MainActor in
@@ -171,9 +191,9 @@ struct WebChatShellView: View {
     // MARK: - 顶栏
 
     private var topBar: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 8) {
             Button { showSessionDrawer = true } label: {
-                Image(systemName: "sidebar.left")
+                Image(systemName: "sidebar.left").dsGlassIcon()
             }
             .accessibilityLabel("会话列表")
 
@@ -182,6 +202,7 @@ struct WebChatShellView: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.leading, 2)
 
             if watcher.activeIsRunning {
                 ProgressView()
@@ -190,25 +211,28 @@ struct WebChatShellView: View {
             }
 
             Button { showModePicker = true } label: {
-                Image(systemName: "sparkles")
+                Image(systemName: "sparkles").dsGlassIcon()
             }
             .disabled(sessionId == nil)
+            .opacity(sessionId == nil ? 0.45 : 1)
             .accessibilityLabel("切换模式")
 
             Button { showModelPicker = true } label: {
-                Image(systemName: "cpu")
+                Image(systemName: "cpu").dsGlassIcon()
             }
             .disabled(sessionId == nil)
+            .opacity(sessionId == nil ? 0.45 : 1)
             .accessibilityLabel("切换模型")
 
             Button { showPermissionPicker = true } label: {
-                Image(systemName: "checkmark.shield")
+                Image(systemName: "checkmark.shield").dsGlassIcon()
             }
             .disabled(sessionId == nil)
+            .opacity(sessionId == nil ? 0.45 : 1)
             .accessibilityLabel("会话权限")
 
             Button { webCoordinator.newSession() } label: {
-                Image(systemName: "square.and.pencil")
+                Image(systemName: "square.and.pencil").dsGlassIcon()
             }
             .accessibilityLabel("新建会话")
 
@@ -219,20 +243,21 @@ struct WebChatShellView: View {
                     Label("App 设置", systemImage: "gearshape")
                 }
                 Button {
-                    webCoordinator.reload()
+                    requestWebReload()
                 } label: {
                     Label("重新加载网页", systemImage: "arrow.clockwise")
                 }
             } label: {
-                Image(systemName: "gearshape")
+                Image(systemName: "gearshape").dsGlassIcon()
             }
             .accessibilityLabel("设置")
         }
-        .font(.system(size: 16))
-        .foregroundStyle(.purple)
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
-        .background(.bar)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 7)
+        .dsGlassPanel()
+        .padding(.horizontal, 10)
+        .padding(.top, 4)
+        .padding(.bottom, 8)
     }
 
     // MARK: - 模式 / 模型 / 权限
@@ -320,6 +345,8 @@ private struct NativeComposerBar: View {
     @State private var showCommandPicker = false
     /// 命令执行结果（横幅展示，几秒后自动消失）
     @State private var commandOutput: String?
+    /// 生成中发送消息的方式："queue"=排队（不打断当前生成）/ "steer"=立刻插话
+    @State private var sendMode = "queue"
     @StateObject private var speech = SpeechRecognizer()
     @FocusState private var inputFocused: Bool
 
@@ -339,6 +366,15 @@ private struct NativeComposerBar: View {
             }
             if !attachments.isEmpty {
                 attachmentChips
+            }
+            // 生成中：让用户自己决定这条消息是排队等还是立刻插话打断
+            if isRunning {
+                HStack(spacing: 6) {
+                    sendModeChip("排队", value: "queue", icon: "clock")
+                    sendModeChip("马上插话", value: "steer", icon: "bolt.fill")
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 10)
             }
             HStack(alignment: .bottom, spacing: 6) {
                 Button {
@@ -395,7 +431,11 @@ private struct NativeComposerBar: View {
                     .lineLimit(1...5)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
-                    .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 18))
+                    .background(Color.white.opacity(0.10), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .strokeBorder(Color.white.opacity(0.12), lineWidth: 0.7)
+                    )
                     .focused($inputFocused)
                     .disabled(sessionId == nil)
                     .onSubmit { send() }
@@ -411,21 +451,24 @@ private struct NativeComposerBar: View {
                     .accessibilityLabel("停止生成")
                 }
 
-                // 发送：生成中 = 插话（mode=steer）
+                // 发送：生成中按上面的选择 = 排队（queue）或马上插话（steer）
                 Button {
                     send()
                 } label: {
-                    Image(systemName: isRunning ? "bolt.circle.fill" : "arrow.up.circle.fill")
+                    Image(systemName: isRunning ? (sendMode == "steer" ? "bolt.circle.fill" : "clock.circle.fill") : "arrow.up.circle.fill")
                         .font(.system(size: 28))
                         .foregroundStyle(canSend ? .purple : .gray)
                 }
-                .accessibilityLabel(isRunning ? "插话" : "发送")
+                .accessibilityLabel(isRunning ? (sendMode == "steer" ? "马上插话" : "排队发送") : "发送")
                 .disabled(!canSend)
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
         }
-        .background(.bar)
+        // 悬浮玻璃输入条：四周留边，露出底下的光斑
+        .dsGlassPanel(corner: 24, tint: .purple)
+        .padding(.horizontal, 10)
+        .padding(.bottom, 8)
         .fileImporter(
             isPresented: $showDocumentPicker,
             allowedContentTypes: [.item],
@@ -471,6 +514,25 @@ private struct NativeComposerBar: View {
                 speech.reset()
             }
         }
+    }
+
+    /// 生成中的发送方式选择（排队 / 马上插话）
+    private func sendModeChip(_ title: String, value: String, icon: String) -> some View {
+        let selected = sendMode == value
+        return Button {
+            sendMode = value
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: icon)
+                    .font(.caption2)
+                Text(title)
+                    .font(.caption.weight(selected ? .semibold : .regular))
+            }
+            .foregroundStyle(selected ? Color.white : Color.purple)
+            .dsGlassCapsule(active: selected)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(value == "steer" ? "生成中发送为马上插话" : "生成中发送为排队")
     }
 
     /// 命令执行结果横幅（网页斜杠命令在原生输入条里的等价物）
@@ -537,7 +599,7 @@ private struct NativeComposerBar: View {
         let text = trimmed
         let atts = attachments
         guard !text.isEmpty || !atts.isEmpty else { return }
-        let mode = isRunning ? "steer" : "queue"
+        let mode = isRunning ? sendMode : "queue"
         let isCommand = text.hasPrefix("/")
         inputText = ""
         attachments = []
