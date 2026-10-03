@@ -627,6 +627,22 @@ struct MessageBubble: View {
             .padding(.vertical, 6)
             .background(.purple.opacity(0.15), in: Capsule())
             .accessibilityLabel("工具调用 \(name) \(id)")
+        case .file(let name, let bytes):
+            HStack(spacing: 6) {
+                Image(systemName: "paperclip")
+                    .font(.caption)
+                Text(name)
+                    .font(.caption.bold())
+                    .lineLimit(1)
+                if bytes > 0 {
+                    Text(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(.purple.opacity(0.12), in: Capsule())
         case .other:
             EmptyView()
         }
