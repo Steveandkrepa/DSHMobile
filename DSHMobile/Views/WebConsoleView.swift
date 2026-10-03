@@ -34,10 +34,13 @@ struct WebConsoleView: View {
     ///   否则网页视图会盖住原生栏，且网页内 env(safe-area-inset-*) 会与原生栏重复补偿。
     var fillSafeArea: Bool = true
 
-    /// 显式初始化：只暴露 fillSafeArea（其余 @State 均自带默认值）。
-    /// 嵌入外壳时用 WebConsoleView(fillSafeArea: false)。
-    init(fillSafeArea: Bool = true) {
+    /// 显式初始化：只暴露 fillSafeArea 与可选的外部 Coordinator。
+    /// · 嵌入外壳（WebChatShellView）时传入自己持有的 Coordinator，外壳即可调用
+    ///   coordinator.openSession(_:) / newSession() 在网页里切换会话。
+    /// · 不传则内部自建（与 1.0 之前行为一致）。
+    init(fillSafeArea: Bool = true, coordinator: Coordinator? = nil) {
         self.fillSafeArea = fillSafeArea
+        self.coordinator = coordinator ?? Coordinator()
     }
 
     @State private var url: URL?
@@ -48,7 +51,7 @@ struct WebConsoleView: View {
     @State private var showControlSheet = false
     @State private var showSetup = false
 
-    private let coordinator = Coordinator()
+    private let coordinator: Coordinator
 
     var body: some View {
         Group {
@@ -237,6 +240,10 @@ final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptM
     var onOpenControl: (() -> Void)?
     /// 会话页阶段变化回调（JS 回传 "hero" / "active" / "settling"；无会话页为 nil）
     var onPhaseChanged: ((String?) -> Void)?
+    /// 原生触发的网页导航结果（JS 回传 "opened" / "open-failed" / "created" / "create-failed"）
+    var onNavResult: ((String) -> Void)?
+    /// Web 内容进程崩溃后自动重载的次数（防止崩溃循环）
+    private var processCrashCount = 0
 
     private weak var webView: WKWebView?
     private let pairingFailureMarkers = ["配对", "pair", "未授权", "授权", "设备"]
@@ -269,7 +276,32 @@ final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptM
             Task { @MainActor [weak self] in
                 self?.onPhaseChanged?(phase)
             }
+        } else if message.name == "dshNav" {
+            let body = message.body as? String ?? ""
+            Task { @MainActor [weak self] in
+                self?.onNavResult?(body)
+            }
         }
+    }
+
+    // MARK: 原生 → 网页
+
+    /// 执行一段 JS（在主线程、对主框架）
+    func evaluate(_ script: String, completion: ((Any?) -> Void)? = nil) {
+        webView?.evaluateJavaScript(script) { value, _ in completion?(value) }
+    }
+
+    /// 打开指定会话（网页无深链 → 代理点击侧栏对应会话行）。
+    /// 只发指令；结果通过 onNavResult("opened"/"open-failed") 异步回执。
+    func openSession(_ sessionId: String) {
+        let escaped = sessionId.replacingOccurrences(of: "'", with: "")
+        evaluate("window.__dshOpenSession ? window.__dshOpenSession('\(escaped)') : false")
+    }
+
+    /// 新建会话（代理点击网页侧栏的「新建会话」按钮）。
+    /// 结果通过 onNavResult("created"/"create-failed") 回执。
+    func newSession() {
+        evaluate("window.__dshNewSession ? window.__dshNewSession() : false")
     }
 
     /// 下拉刷新 / 手动重载
@@ -295,9 +327,23 @@ final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptM
         Task { @MainActor in
             onProgress?(1)
             onLoaded?()
+            processCrashCount = 0
             // 页面就绪后再跑一次移动端适配（SPA 可能覆盖了最初的注入）
             webView.evaluateJavaScript(WebViewCoordinator.mobileAdaptationJS, completionHandler: nil)
             checkPairingFailure(webView)
+        }
+    }
+
+    /// Web 内容进程被系统回收 / 渲染崩溃：自动重载自愈。
+    /// 连续崩溃超过 3 次才报错，避免崩溃-重载死循环把用户卡在白屏。
+    nonisolated func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        Task { @MainActor in
+            if processCrashCount < 3 {
+                processCrashCount += 1
+                webView.reload()
+            } else {
+                onLoadError?("网页渲染进程反复崩溃，请点「重试」或重启 App。")
+            }
         }
     }
 
@@ -446,6 +492,8 @@ struct WebViewRepresentable: UIViewRepresentable {
         configuration.userContentController.add(context.coordinator, name: "dshOpenControl")
         // 会话页阶段回传通道（hero / active / settling → 原生输入条显隐）
         configuration.userContentController.add(context.coordinator, name: "dshPhase")
+        // 原生触发的网页导航回执通道（打开会话 / 新建会话的结果）
+        configuration.userContentController.add(context.coordinator, name: "dshNav")
 
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.allowsBackForwardNavigationGestures = true
@@ -500,6 +548,110 @@ enum WebViewCoordinator {
         }
       }
 
+      // ---- 原生层可调用的窗口 API ----
+      // 网页没有会话深链（URL 不携带 sessionId），打开会话的唯一通道是点击侧栏里
+      // 对应的会话行：官方侧栏行是 div[role=treeitem][data-row-key="session:<id>"]，
+      // 自身带 onClick → onOpen(id)。行可能因窄屏侧栏折叠 / 分组合并 / 列表虚拟化
+      // 而不在 DOM 中，所以：直接点 → 展开分组与"更多"再点 → 250ms 间隔重试 8 次。
+      // 结果通过 messageHandlers.dshNav 回执（opened / open-failed / created /
+      // create-failed），原生层据此给用户明确反馈。
+      function dshNavReport(text) {
+        try { window.webkit.messageHandlers.dshNav.postMessage(text); } catch (e) { /* 未注册时忽略 */ }
+      }
+
+      function dshFindSessionRow(id) {
+        try { return document.querySelector('[data-row-key="session:' + id + '"]'); } catch (e) { return null; }
+      }
+
+      function dshClickSessionRow(id) {
+        var row = dshFindSessionRow(id);
+        if (!row) { return false; }
+        try { row.scrollIntoView({ block: 'nearest' }); } catch (e) {}
+        try { row.click(); } catch (e) { return false; }
+        return true;
+      }
+
+      // 展开所有折叠的工作区分组与「显示更多会话」
+      function dshExpandSessionGroups() {
+        var nodes = document.querySelectorAll('[data-row-key^="workspace:"], [data-row-key^="overflow:"]');
+        for (var i = 0; i < nodes.length; i++) {
+          try {
+            if (nodes[i].getAttribute('aria-expanded') === 'false') { nodes[i].click(); }
+          } catch (e) {}
+        }
+      }
+
+      window.__dshOpenSession = function (id) {
+        if (!id) { return false; }
+        if (dshClickSessionRow(id)) { dshNavReport('opened'); return true; }
+        dshExpandSessionGroups();
+        if (dshClickSessionRow(id)) { dshNavReport('opened'); return true; }
+        var attempt = 0;
+        (function retry() {
+          attempt += 1;
+          setTimeout(function () {
+            if (dshClickSessionRow(id)) { dshNavReport('opened'); return; }
+            dshExpandSessionGroups();
+            if (dshClickSessionRow(id)) { dshNavReport('opened'); return; }
+            if (attempt < 8) { retry(); } else { dshNavReport('open-failed'); }
+          }, 250);
+        })();
+        return false;
+      };
+
+      // 新建会话：点官方侧栏工作区行里的「新建会话」按钮（aria-label 带会话名）
+      // 窄屏时侧栏可能整体收起（<1024px 收成 56px 轨道）导致按钮不在 DOM 中，
+      // 因此找不到时先尝试展开侧栏，再以 250ms 间隔重试若干次。
+      window.__dshNewSession = function () {
+        function findNewSessionButton() {
+          var nodes = document.querySelectorAll('button[aria-label], [role="button"][aria-label], a[aria-label]');
+          for (var i = 0; i < nodes.length; i++) {
+            var label = nodes[i].getAttribute('aria-label') || '';
+            var lower = label.toLowerCase();
+            if (label.indexOf('新建会话') >= 0 || label.indexOf('新会话') >= 0 || lower.indexOf('new session') >= 0) {
+              return nodes[i];
+            }
+          }
+          return null;
+        }
+        function expandSidebar() {
+          var nodes = document.querySelectorAll('button[aria-label], [role="button"][aria-label]');
+          for (var i = 0; i < nodes.length; i++) {
+            var label = nodes[i].getAttribute('aria-label') || '';
+            if (/侧栏|侧边栏|sidebar|导航/i.test(label)) {
+              try { nodes[i].click(); } catch (e) {}
+              return true;
+            }
+          }
+          return false;
+        }
+        var target = findNewSessionButton();
+        if (!target) {
+          expandSidebar();
+          target = findNewSessionButton();
+        }
+        if (target) {
+          try { target.click(); } catch (e) { dshNavReport('create-failed'); return false; }
+          dshNavReport('created');
+          return true;
+        }
+        var attempt = 0;
+        (function retry() {
+          attempt += 1;
+          setTimeout(function () {
+            var button = findNewSessionButton();
+            if (button) {
+              try { button.click(); } catch (e) { /* 落到下一次重试 */ }
+              dshNavReport('created');
+              return;
+            }
+            if (attempt === 3) { expandSidebar(); }
+            if (attempt < 8) { retry(); } else { dshNavReport('create-failed'); }
+          }, 250);
+        })();
+        return false;
+      };
+
       function ensureViewport() {
         var content = 'width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover';
         var meta = document.querySelector('meta[name="viewport"]');
@@ -533,12 +685,12 @@ enum WebViewCoordinator {
           '[role="dialog"] [class*="topbar"], [data-shortcut-modal] [class*="topbar"] {',
           '  padding-top: 0 !important;',
           '}',
-          // 原生输入条接管（WebChatShellView）：官方会话页的 composer 隐藏，
-          // 由原生底栏统一承载输入/发送/插话/停止，避免出现两条输入栏。
-          // 仅隐藏 phase=active/settling（会话进行中）的输入区；phase=hero 的首屏
-          // 输入框保留，网页原生的「新建会话」流程不受影响。
-          '[data-phase="active"] [data-composer-seat], [data-phase="settling"] [data-composer-seat],',
-          '[data-content-phase="active"] [data-composer-seat], [data-content-phase="settling"] [data-composer-seat] {',
+          // 原生输入条接管（WebChatShellView）—— 互斥不变式：
+          // 只有当原生输入条**确实已经在屏幕上**时（JS 判定当前是会话页且拿到非空
+          // 会话 id，会给 <html> 打上 .dsh-native-composer），才隐藏网页自带的输入区。
+          // 判定与原生输入条的显示条件出自同一段 JS 的同一组取值，两者不可能同时为假
+          // —— 任何桥接失败/属性缺失都只是回到"网页输入条兜底"，绝不会出现"没有输入框"。
+          'html.dsh-native-composer [data-composer-seat] {',
           '  display: none !important;',
           '}',
           '@media (max-width: 600px) {',
@@ -572,8 +724,17 @@ enum WebViewCoordinator {
         var last = null;
         var lastPhase = null;
         function currentSessionId() {
+          // 属性可能被渲染成空串（React 传 null 时 attribute=""），空串按"没有会话"处理
           var el = document.querySelector('[data-conversation-session]');
-          return el ? el.getAttribute('data-conversation-session') : null;
+          var id = el ? (el.getAttribute('data-conversation-session') || '') : '';
+          if (!id) {
+            // 兜底：侧栏里被选中的会话行（行自带 aria-selected）
+            var row = document.querySelector('[data-row-key^="session:"][aria-selected="true"]');
+            if (row) {
+              id = (row.getAttribute('data-row-key') || '').replace(/^session:/, '');
+            }
+          }
+          return id ? id : null;
         }
         // 会话页阶段：hero=首屏（新建会话）/ active=会话进行中 / settling=收尾。
         // 原生层据此决定是否显示原生输入条（hero 交给网页首屏输入框）。
@@ -590,15 +751,27 @@ enum WebViewCoordinator {
           }
           return phase;
         }
+        // 原生输入条是否应当接管（与 Swift 侧 WebChatShellView.isConversationPage 同源：
+        // 有非空会话 id 且不在 hero 首屏）。为 true 时给 <html> 打标记，CSS 才隐藏
+        // 网页自带输入区；否则网页输入条始终可见 —— 桥接任何一环失败都不会没有输入框。
+        function syncNativeComposer(id, phase) {
+          var root = document.documentElement;
+          if (!root || !root.classList) { return; }
+          var native = !!id && phase !== 'hero';
+          if (native !== root.classList.contains('dsh-native-composer')) {
+            root.classList.toggle('dsh-native-composer', native);
+          }
+        }
         function report() {
           var id = currentSessionId();
+          var phase = currentPhase();
+          syncNativeComposer(id, phase);
           if (id !== last) {
             last = id;
             try {
               window.webkit.messageHandlers.dshSession.postMessage(id || '');
             } catch (e) { /* 原生侧未注册时忽略 */ }
           }
-          var phase = currentPhase();
           if (phase !== lastPhase) {
             lastPhase = phase;
             try {
