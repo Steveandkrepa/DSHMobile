@@ -61,6 +61,9 @@ final class ChatViewModel: ObservableObject {
     private var turnStartSeq = 0
     /// 当前正在执行的步骤（工具调用 / 思考 / 等待授权），供灵动岛长按展示
     private var currentStep: String = ""
+    /// 实时活动更新的节流：流式增量很频繁，ActivityKit 更新有成本，合并到 ~400ms 一次
+    private var lastLiveActivityUpdate: TimeInterval = 0
+    private let liveActivityThrottle: TimeInterval = 0.4
 
     // MARK: - token 统计与真实进度（来自服务端投影）
 
@@ -370,6 +373,12 @@ final class ChatViewModel: ObservableObject {
                     name: b["name"]?.stringValue ?? "",
                     arguments: b["arguments"]?.stringValue ?? ""
                 )
+            case "file":
+                // 形状：{type:"file", receiptId} 或 {type:"file", attachment:{name,bytes}}
+                let attachment = b["attachment"]?.objectValue
+                let name = attachment?["name"]?.stringValue ?? b["name"]?.stringValue ?? ""
+                let bytes = attachment?["bytes"]?.numberValue ?? b["bytes"]?.numberValue ?? 0
+                return .file(name: name, bytes: Int64(bytes))
             default:
                 return .other
             }
@@ -439,17 +448,36 @@ final class ChatViewModel: ObservableObject {
 
     // MARK: - 发送 / 取消
 
-    func send(_ text: String) {
+    /// 是否正在提交 prompt RPC（用于防重入；生成期间仍可插话发送）
+    @Published private(set) var isSending = false
+
+    /// 待发送的已上传附件（receiptId + 显示名）
+    struct PendingAttachment: Equatable, Identifiable {
+        let id = UUID()
+        let receiptId: String
+        let name: String
+    }
+
+    func send(_ text: String, attachments: [PendingAttachment] = []) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        canSend = false
+        guard !trimmed.isEmpty || !attachments.isEmpty else { return }
+        guard !isSending else { return }
+        isSending = true
+        // 生成中发送 = 插话（steer），否则普通队列（queue）
+        let mode = isStreaming ? "steer" : "queue"
         Task { [weak self] in
             guard let self else { return }
+            defer { self.isSending = false }
             do {
-                _ = try await self.api.prompt(sessionId: self.sessionId, text: trimmed)
+                _ = try await self.api.prompt(
+                    sessionId: self.sessionId,
+                    text: trimmed,
+                    mode: mode,
+                    attachments: attachments.map(\.receiptId)
+                )
             } catch {
                 self.errorMessage = "发送失败：\(error.localizedDescription)"
-                self.canSend = true
+                if !self.isStreaming { self.canSend = true }
             }
         }
     }
@@ -647,9 +675,19 @@ final class ChatViewModel: ObservableObject {
         return String(text.suffix(60))
     }
 
-    /// 流式增量：更新进度（真实上下文占用优先）与状态文案
+    /// 流式增量：更新进度（真实上下文占用优先）与状态文案。
+    /// 节流合并：≤0.4s 内的重复增量只记录状态，不触发 ActivityKit 更新。
     private func updateLiveActivityProgress() {
-        guard settings.liveActivitiesEnabled, let liveActivity else { return }
+        guard settings.liveActivitiesEnabled, liveActivity != nil else { return }
+        let now = Date().timeIntervalSince1970
+        if now - lastLiveActivityUpdate < liveActivityThrottle {
+            // 仍在节流窗口：仅刷新字符统计，跳过昂贵的活动更新
+            streamedChars = messages.reduce(0) { acc, m in
+                acc + m.blocks.reduce(0) { $0 + ($1.text.count) }
+            }
+            return
+        }
+        lastLiveActivityUpdate = now
         // 汇总当前流式消息已收文本长度作为进度参考（字符启发式回落时用）
         streamedChars = messages.reduce(0) { acc, m in
             acc + m.blocks.reduce(0) { $0 + ($1.text.count) }

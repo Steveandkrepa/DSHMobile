@@ -148,18 +148,66 @@ struct APIClient {
         return try await call("session/create", args: ["request": request], as: CreateSessionResult.self)
     }
 
-    /// 发送消息（session/prompt，参数 request；followup 模式）
+    /// 发送消息（session/prompt，参数 request）
+    /// - mode: "queue" 普通发送；"steer" 插话（正在生成时打断并加入）
+    /// - attachments: 已上传文件的 receiptId 列表（fileUploads/upload 返回）
     struct PromptResult: Decodable {
         let accepted: Bool
     }
-    func prompt(sessionId: String, text: String, requestId: String = UUID().uuidString) async throws -> PromptResult {
-        let content: [[String: Any]] = [["type": "text", "text": text]]
+    func prompt(sessionId: String, text: String, mode: String = "queue",
+                attachments: [String] = [], requestId: String = UUID().uuidString) async throws -> PromptResult {
+        var content: [[String: Any]] = []
+        for receiptId in attachments {
+            content.append(["type": "file", "receiptId": receiptId])
+        }
+        if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            content.append(["type": "text", "text": text])
+        }
         let request: [String: Any] = [
             "sessionId": sessionId,
+            "mode": mode,
             "content": content,
             "requestId": requestId,
         ]
         return try await call("session/prompt", args: ["request": request], as: PromptResult.self)
+    }
+
+    /// 上传文件（fileUploads/upload，参数 agentId + request{data,name}）
+    /// 返回 receiptId，供 session/prompt 的 content file 块引用。
+    struct FileUploadResult: Decodable {
+        let receiptId: String
+        let file: UploadedFile?
+    }
+    struct UploadedFile: Decodable {
+        let attachmentId: String
+        let name: String
+        let bytes: Int64
+    }
+    func uploadFile(sessionId: String, name: String, data: Data) async throws -> FileUploadResult {
+        let request: [String: Any] = [
+            "agentId": sessionId,
+            "request": ["data": data.base64EncodedString(), "name": name],
+        ]
+        return try await call("fileUploads/upload", args: request, as: FileUploadResult.self)
+    }
+
+    /// 执行会话命令（commands/execute，参数 agentId + line + submittedAttachments）
+    /// 例：line = "/permission workspace-write" 可切换会话权限预设。
+    struct CommandExecuteResult: Decodable {
+        let commandId: String
+        let result: CommandResult?
+    }
+    struct CommandResult: Decodable {
+        let kind: String
+        let text: String?
+    }
+    func runCommand(sessionId: String, line: String) async throws -> CommandExecuteResult {
+        let request: [String: Any] = [
+            "agentId": sessionId,
+            "line": line,
+            "submittedAttachments": [],
+        ]
+        return try await call("commands/execute", args: request, as: CommandExecuteResult.self)
     }
 
     /// 取消当前回合（session/cancel，参数 request）

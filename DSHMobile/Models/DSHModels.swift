@@ -174,6 +174,7 @@ struct ChatMessage: Identifiable, Equatable {
         case text(String)
         case reasoning(String)
         case toolCall(id: String, name: String, arguments: String)
+        case file(name: String, bytes: Int64)
         case other
 
         var displayText: String? {
@@ -181,6 +182,7 @@ struct ChatMessage: Identifiable, Equatable {
             case .text(let t): return t
             case .reasoning(let t): return t
             case .toolCall(_, let n, _): return "[工具] \(n)"
+            case .file(let n, _): return "[文件] \(n)"
             case .other: return nil
             }
         }
@@ -190,6 +192,7 @@ struct ChatMessage: Identifiable, Equatable {
             switch self {
             case .text(let t), .reasoning(let t): return t
             case .toolCall(_, let n, _): return "[工具] \(n)"
+            case .file(let n, _): return "[文件] \(n)"
             case .other: return ""
             }
         }
@@ -235,6 +238,7 @@ struct ChatMessage: Identifiable, Equatable {
         if case .text(let existing) = blocks[index] {
             blocks[index] = .text(existing + text)
         }
+        streamedText += text
     }
 
     mutating func appendReasoning(_ text: String, at index: Int) {
@@ -242,6 +246,7 @@ struct ChatMessage: Identifiable, Equatable {
         if case .reasoning(let existing) = blocks[index] {
             blocks[index] = .reasoning(existing + text)
         }
+        streamedText += text
     }
 
     mutating func appendToolCall(id: String?, name: String?, argumentsDelta: String, at index: Int) {
