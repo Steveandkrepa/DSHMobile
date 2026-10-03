@@ -10,6 +10,7 @@
 //  多个会话同时运行时只跟随最新的一个（灵动岛只保留一个）。
 // ============================================================================
 import Foundation
+import Combine
 
 @MainActor
 final class SessionWatcher: ObservableObject {
@@ -17,12 +18,16 @@ final class SessionWatcher: ObservableObject {
 
     /// 当前网页壳打开的会话摘要（用于原生顶栏标题/模型/模式/权限显示）
     @Published private(set) var activeSummary: SessionSummary?
-    /// 当前打开的会话是否正在生成（原生输入条据此决定「发送」还是「插话/停止」）
+    /// 当前打开的会话是否正在生成（原生输入条据此决定「发送」还是「插话/停止」）。
+    /// 优先来自跟随流的 turn/start、turn/end（毫秒级准确）；没有跟随流时
+    /// 回落到 session/list 的 running 字段（最多 5s 延迟）。
     @Published private(set) var activeIsRunning = false
 
     private var pollTask: Task<Void, Never>?
     private var engine: ChatViewModel?
     private var followedSessionId: String?
+    /// 跟随流 isStreaming 的订阅（拿到精确的 turn/start、turn/end）
+    private var engineCancellable: AnyCancellable?
     private let settings = AppSettings.shared
 
     private init() {}
@@ -69,7 +74,13 @@ final class SessionWatcher: ObservableObject {
             } else {
                 activeSummary = nil
             }
-            activeIsRunning = activeSummary?.running ?? false
+            // 正在跟随目标会话时，以跟随流的 isStreaming 为准（turn/end 一到就是准确值）；
+            // 否则用 session/list 的 running 字段兜底（最多 5s 延迟）。
+            if let engine, followedSessionId == settings.activeWebSessionId {
+                activeIsRunning = engine.isStreaming
+            } else {
+                activeIsRunning = activeSummary?.running ?? false
+            }
             let running = sessions.filter { $0.running }
             // 优先跟随当前打开的会话（Web 壳 JS 检测回传）；否则跟随最近更新的运行中会话
             var target = running.first { $0.sessionId == settings.activeWebSessionId }
@@ -82,6 +93,15 @@ final class SessionWatcher: ObservableObject {
                     let vm = ChatViewModel(sessionId: target.sessionId, settings: settings)
                     engine = vm
                     followedSessionId = target.sessionId
+                    // 跟随流的 isStreaming 才是「回复是否结束」的权威信号
+                    // （turn/start → true，turn/end → false），用它覆盖轮询的粗略值。
+                    engineCancellable = vm.$isStreaming.sink { [weak self] streaming in
+                        Task { @MainActor in
+                            guard let self, self.followedSessionId == vm.sessionId,
+                                  self.settings.activeWebSessionId == vm.sessionId else { return }
+                            self.activeIsRunning = streaming
+                        }
+                    }
                     vm.start()
                 }
             } else {
@@ -93,6 +113,8 @@ final class SessionWatcher: ObservableObject {
     }
 
     private func stopEngine() {
+        engineCancellable?.cancel()
+        engineCancellable = nil
         engine?.stop()
         engine = nil
         followedSessionId = nil
